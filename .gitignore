@@ -3,3 +3,4 @@ cifar/*
 mnist/*
 svhn/*
 model/*
+.idea/*

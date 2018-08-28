@@ -243,6 +243,8 @@ class Trainer(object):
 
             if iter % batch_per_epoch == 0:
                 epoch = iter / batch_per_epoch
+                if epoch >= config.max_epochs:
+                    break
                 epoch_ratio = float(epoch) / float(config.max_epochs)
                 # use another outer max to prevent any float computation precision problem
                 self.dis_optimizer.param_groups[0]['lr'] = max(min_lr, config.dis_lr * min(3. * (1. - epoch_ratio), 1.))

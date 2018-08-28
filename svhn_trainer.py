@@ -236,7 +236,7 @@ class Trainer(object):
 
             if iter % batch_per_epoch == 0:
                 epoch = iter / batch_per_epoch
-                if config.dataset != 'svhn' and epoch >= config.max_epochs:
+                if config.dataset != 'svhn' or epoch >= config.max_epochs:
                     break
                 epoch_ratio = float(epoch) / float(config.max_epochs)
                 # use another outer max to prevent any float computation precision problem

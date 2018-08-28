@@ -3,6 +3,9 @@ import math
 import torch
 import torch.nn as nn
 from torch.autograd import Variable
+# import pdb
+# pdb.set_trace()
+# pdb.set_trace = lambda: None
 
 def gaussian_nll(mu, log_sigma, noise):
     NLL = torch.sum(log_sigma, 1) + \
@@ -19,14 +22,14 @@ def log_sum_exp(logits, mask=None, inf=1e7):
     if mask is not None:
         logits = logits * mask - inf * (1.0 - mask)
         max_logits = logits.max(1)[0]
-        return ((logits - max_logits.expand_as(logits)).exp() * mask).sum(1).log().squeeze() + max_logits.squeeze()
+        return ((logits - max_logits.unsqueeze(1).expand_as(logits)).exp() * mask).sum(1).log().squeeze() + max_logits.squeeze()
     else:
         max_logits = logits.max(1)[0]
-        return ((logits - max_logits.expand_as(logits)).exp()).sum(1).log().squeeze() + max_logits.squeeze()
+        return ((logits - max_logits.unsqueeze(1).expand_as(logits)).exp()).sum(1).log().squeeze() + max_logits.squeeze()
 
 def log_sum_exp_0(logits):
     max_logits = logits.max()
-    return (logits - max_logits.expand_as(logits)).exp().sum().log() + max_logits
+    return (logits - max_logits.unsqueeze(1).expand_as(logits)).exp().sum().log() + max_logits
 
 def entropy(logits):
     probs = nn.functional.softmax(logits)
