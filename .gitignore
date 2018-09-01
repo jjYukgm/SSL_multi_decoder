@@ -4,3 +4,4 @@ mnist/*
 svhn/*
 model/*
 .idea/*
+*_log/*

@@ -13,6 +13,7 @@ import model
 import random
 import time
 import os, sys
+import glob # use '*' in path
 import math
 import argparse
 from collections import OrderedDict
@@ -20,7 +21,7 @@ from collections import OrderedDict
 import numpy as np
 from utils import *
 
-class Trainer(object):
+class Tester(object):
 
     def __init__(self, config, args):
         self.config = config
@@ -41,11 +42,10 @@ class Trainer(object):
         self.gen = model.Generator(image_size=config.image_size, noise_size=config.noise_size).cuda()
         self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
 
-        self.dis_optimizer = optim.Adam(self.dis.parameters(), lr=config.dis_lr, betas=(0.5, 0.999))
-        self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
-        self.enc_optimizer = optim.Adam(self.enc.parameters(), lr=config.enc_lr, betas=(0.0, 0.999))
-
-        self.d_criterion = nn.CrossEntropyLoss()
+        # load model    # ta
+        self.load_network(self.dis, 'D', strict=False)
+        self.load_network(self.gen, 'G', strict=False)
+        self.load_network(self.enc, 'E', strict=False)
 
         if not os.path.exists(self.config.save_dir):
             os.makedirs(self.config.save_dir)
@@ -60,86 +60,6 @@ class Trainer(object):
         labels = labels.data.cpu()
         vis_images = self.special_set.index_select(0, labels)
         return vis_images
-
-    def _train(self, labeled=None, vis=False):
-        config = self.config
-        self.dis.train()
-        self.gen.train()
-        self.enc.train()
-
-        ##### train Dis
-        lab_images, lab_labels = self.labeled_loader.next()
-        lab_images, lab_labels = Variable(lab_images.cuda()), Variable(lab_labels.cuda())
-
-        unl_images, _ = self.unlabeled_loader.next()
-        unl_images = Variable(unl_images.cuda())
-
-        noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
-        gen_images = self.gen(noise)
-        
-        lab_logits = self.dis(lab_images)
-        unl_logits = self.dis(unl_images)
-        gen_logits = self.dis(gen_images.detach())
-
-        # Standard classification loss
-        lab_loss = self.d_criterion(lab_logits, lab_labels)
-
-        # GAN true-fake loss: sumexp(logits) is seen as the input to the sigmoid
-        unl_logsumexp = log_sum_exp(unl_logits)
-        gen_logsumexp = log_sum_exp(gen_logits)
-
-        true_loss = - 0.5 * torch.mean(unl_logsumexp) + 0.5 * torch.mean(F.softplus(unl_logsumexp))
-        fake_loss = 0.5 * torch.mean(F.softplus(gen_logsumexp))
-        unl_loss = true_loss + fake_loss
-         
-        d_loss = lab_loss + unl_loss
-
-        ##### Monitoring (train mode)
-        # true-fake accuracy
-        unl_acc = torch.mean(nn.functional.sigmoid(unl_logsumexp.detach()).gt(0.5).float())
-        gen_acc = torch.mean(nn.functional.sigmoid(gen_logsumexp.detach()).gt(0.5).float())
-        # top-1 logit compared to 0: to verify Assumption (2) and (3)
-        max_unl_acc = torch.mean(unl_logits.max(1)[0].detach().gt(0.0).float())
-        max_gen_acc = torch.mean(gen_logits.max(1)[0].detach().gt(0.0).float())
-
-        self.dis_optimizer.zero_grad()
-        d_loss.backward()
-        self.dis_optimizer.step()
-
-        ##### train Gen and Enc
-        noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
-        gen_images = self.gen(noise)
-
-        # Entropy loss via variational inference
-        mu, log_sigma = self.enc(gen_images)
-        vi_loss = gaussian_nll(mu, log_sigma, noise)
-
-        # Feature matching loss
-        unl_feat = self.dis(unl_images, feat=True)
-        gen_feat = self.dis(gen_images, feat=True)
-        fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
-
-        # Generator loss
-        g_loss = fm_loss + config.vi_weight * vi_loss
-        
-        self.gen_optimizer.zero_grad()
-        self.enc_optimizer.zero_grad()
-        g_loss.backward()
-        self.gen_optimizer.step()
-        self.enc_optimizer.step()
-
-        monitor_dict = OrderedDict([
-                       ('unl acc' , unl_acc.data[0]), 
-                       ('gen acc' , gen_acc.data[0]), 
-                       ('max unl acc' , max_unl_acc.data[0]), 
-                       ('max gen acc' , max_gen_acc.data[0]), 
-                       ('lab loss' , lab_loss.data[0]),
-                       ('unl loss' , unl_loss.data[0]),
-                       ('fm loss' , fm_loss.data[0]),
-                       ('vi loss' , vi_loss.data[0])
-                   ])
-                
-        return monitor_dict
 
     def eval_true_fake(self, data_loader, max_batch=None):
         self.gen.eval()
@@ -246,6 +166,13 @@ class Trainer(object):
         time_str = '| ' + time_str + '\n'
         return time_str
 
+    def load_network(self, net, net_label, strict=True):   # ta
+        save_filename = glob.glob('VI.{}_*_net_{}.pth'.format(self.config.suffix, net_label))[0]
+        save_path = os.path.join(self.config.save_dir, save_filename)
+        net.cpu()
+        net.load_state_dict(torch.load(save_path), strict=strict)
+        net.cuda()
+
     def save_model(self, net, net_label, epo_label):   # ta
         save_filename = 'VI.{}_{}_net_{}.pth'.format(self.config.suffix, epo_label, net_label)
         save_path = os.path.join(self.config.save_dir, save_filename)
@@ -273,15 +200,15 @@ class Trainer(object):
             self.del_model('G', epo_label)
             self.del_model('E', epo_label)
 
-    def train(self):
+    def test(self):
         config = self.config
+        config.max_epochs = 1
         self.param_init()
 
         self.iter_cnt = 0
         iter, min_dev_incorrect = 0, 1e6
-        monitor = OrderedDict()
         
-        batch_per_epoch = int((len(self.unlabeled_loader) + config.train_batch_size - 1) / config.train_batch_size)
+        batch_per_epoch = int((len(self.unlabeled_loader) + config.test_batch_size - 1) / config.train_batch_size)
         min_lr = config.min_lr if hasattr(config, 'min_lr') else 0.0
         start_time = time.time()
         while True:
@@ -291,17 +218,7 @@ class Trainer(object):
                 if epoch >= config.max_epochs:
                     break
                 epoch_ratio = float(epoch) / float(config.max_epochs)
-                # use another outer max to prevent any float computation precision problem
-                self.dis_optimizer.param_groups[0]['lr'] = max(min_lr, config.dis_lr * min(3. * (1. - epoch_ratio), 1.))
-                self.gen_optimizer.param_groups[0]['lr'] = max(min_lr, config.gen_lr * min(3. * (1. - epoch_ratio), 1.))
-                self.enc_optimizer.param_groups[0]['lr'] = max(min_lr, config.enc_lr * min(3. * (1. - epoch_ratio), 1.))
 
-            iter_vals = self._train()
-
-            for k, v in iter_vals.items():
-                if not monitor.has_key(k):
-                    monitor[k] = 0.
-                monitor[k] += v
 
             if iter % config.vis_period == 0:
                 self.visualize()
@@ -318,14 +235,10 @@ class Trainer(object):
 
                 disp_str = '#{}\ttrain: {:.4f}, {:.4f} | dev: {:.4f}, {:.4f} | best: {:.4f}'.format(
                     iter, train_loss, train_incorrect, dev_loss, dev_incorrect, min_dev_incorrect)
-                for k, v in monitor.items():
-                    disp_str += ' | {}: {:.4f}'.format(k, v / config.eval_period)
                 
                 disp_str += ' | [Eval] unl acc: {:.4f}, gen acc: {:.4f}, max unl acc: {:.4f}, max gen acc: {:.4f}'.format(unl_acc, gen_acc, max_unl_acc, max_gen_acc)
-                disp_str += ' | lr: {:.5f}'.format(self.dis_optimizer.param_groups[0]['lr'])
                 disp_str += '\n'
 
-                monitor = OrderedDict()
                 # timer   # ta
                 time_str = self.calculate_remaining(start_time, time.time(), iter / batch_per_epoch)
                 # save model   # ta
@@ -340,13 +253,13 @@ class Trainer(object):
             self.iter_cnt += 1
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='cifar_trainer.py')
+    parser = argparse.ArgumentParser(description='cifar_tester.py')
     parser.add_argument('-suffix', default='run0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', default='', type=str, help="Suffix added to the save images.")
 
     args = parser.parse_args()
 
-    trainer = Trainer(config.cifar_config(), args)
-    trainer.train()
+    tester = Tester(config.cifar_config(), args)
+    tester.test()
 
 
