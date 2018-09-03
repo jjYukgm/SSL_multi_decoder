@@ -192,7 +192,7 @@ class WN_ConvTranspose2d(nn.ConvTranspose2d):
         return activation
 
 class Discriminative(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, ema=False):
         super(Discriminative, self).__init__()
 
         print '===> Init small-conv for {}'.format(config.dataset)
@@ -233,6 +233,10 @@ class Discriminative(nn.Module):
         )
 
         self.out_net = WN_Linear(n_filter_2, self.num_label, train_scale=True, init_stdv=0.1)
+
+        if ema:
+            for param in self.parameters():
+                param.detach_()
 
     def forward(self, X, feat=False):
         if X.dim() == 2:

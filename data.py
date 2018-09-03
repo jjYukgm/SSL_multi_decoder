@@ -1,7 +1,7 @@
 
 import numpy as np
 import torch
-from torchvision.datasets import MNIST, SVHN, CIFAR10
+from torchvision.datasets import MNIST, SVHN, CIFAR10, CIFAR100
 from torchvision import transforms
 import torchvision.utils as vutils
 
@@ -133,6 +133,33 @@ def get_cifar_loaders(config):
     labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
     for i in range(10):
         mask[np.where(labels == i)[0][: config.size_labeled_data / 10]] = True
+    # labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
+    labeled_indices, unlabeled_indices = indices[mask], indices
+    print 'labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], 'dev size', len(dev_set)
+
+    labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
+    unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    unlabeled_loader2 = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+
+    special_set = []
+    for i in range(10):
+        special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
+    special_set = torch.stack(special_set)
+
+    return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
+
+def get_cifarh_loaders(config):
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+    training_set = CIFAR100('cifarh', train=True, download=True, transform=transform)
+    dev_set = CIFAR100('cifarh', train=False, download=True, transform=transform)
+
+    indices = np.arange(len(training_set))
+    np.random.shuffle(indices)
+    mask = np.zeros(indices.shape[0], dtype=np.bool)
+    labels = np.array([training_set[i][1] for i in indices], dtype=np.int64)
+    for i in range(10):
+        mask[np.where(labels == i)[0][: config.size_labeled_data / 100]] = True
     # labeled_indices, unlabeled_indices = indices[mask], indices[~ mask]
     labeled_indices, unlabeled_indices = indices[mask], indices
     print 'labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], 'dev size', len(dev_set)
