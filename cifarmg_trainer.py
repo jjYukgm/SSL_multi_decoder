@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,10 +19,11 @@ from collections import OrderedDict
 import numpy as np
 from utils import *
 import losses, ramps
-
+import pdb
+# pdb.set_trace()
+# pdb.set_trace = lambda: None
 
 class Trainer(object):
-
     def __init__(self, config, args):
         self.config = config
         for k, v in args.__dict__.items():
@@ -37,7 +37,8 @@ class Trainer(object):
         sys.stdout.write(disp_str)
         sys.stdout.flush()
 
-        self.labeled_loader, self.unlabeled_loader, self.unlabeled_loader2, self.dev_loader, self.special_set = data.get_cifar_loaders(config)
+        self.labeled_loader, self.unlabeled_loader, self.unlabeled_loader2, self.dev_loader, self.special_set = data.get_cifar_loaders(
+            config)
 
         self.dis = model.Discriminative(config).cuda()
         self.ema_dis = model.Discriminative(config, ema=True).cuda()
@@ -54,9 +55,9 @@ class Trainer(object):
 
         self.d_criterion = nn.CrossEntropyLoss()
         if config.consistency_type == 'mse':
-            self.consistency_criterion = losses.softmax_mse_loss   # nn.MSELoss()    # (size_average=False)
+            self.consistency_criterion = losses.softmax_mse_loss  # nn.MSELoss()    # (size_average=False)
         elif config.consistency_type == 'kl':
-            self.consistency_criterion = losses.softmax_kl_loss    # nn.KLDivLoss()  # (size_average=False)
+            self.consistency_criterion = losses.softmax_kl_loss  # nn.KLDivLoss()  # (size_average=False)
         else:
             pass
         self.consistency_weight = 0
@@ -101,6 +102,8 @@ class Trainer(object):
 
         ema_lab_logits = self.ema_dis(lab_images)
         ema_lab_logits = Variable(ema_lab_logits.detach().data, requires_grad=False)
+        ema_unl_logits = self.ema_dis(unl_images)
+        ema_unl_logits = Variable(ema_unl_logits.detach().data, requires_grad=False)
 
         # Standard classification loss
         lab_loss = self.d_criterion(lab_logits, lab_labels)
@@ -115,8 +118,9 @@ class Trainer(object):
 
         # ema consistency loss
         cons_loss = self.consistency_weight * \
-                    self.consistency_criterion(lab_logits, ema_lab_logits) \
-                    / self.config.train_batch_size
+                    (  self.consistency_criterion(lab_logits, ema_lab_logits)  \
+                     + self.consistency_criterion(unl_logits, ema_unl_logits)) \
+                    / (self.config.train_batch_size + self.config.train_batch_size_2)
 
         d_loss = lab_loss + unl_loss + cons_loss
 
@@ -135,19 +139,33 @@ class Trainer(object):
         ##### train Gen and Enc
         noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
         gen_images = self.gen(noise)
+        mu, sig = self.enc(lab_images)
+        # pdb.set_trace()
+        tdn = torch.distributions.Normal(mu.mean(0).unsqueeze(0), sig.mean(0).unsqueeze(0))
+        enc_noise = torch.cat([tdn.sample() for i in range(lab_images.size(0))])
+        gel_images = self.gen(enc_noise)
 
         # Entropy loss via variational inference
         mu, log_sigma = self.enc(gen_images)
         vi_loss = gaussian_nll(mu, log_sigma, noise)
 
-        # Feature matching loss, dis => ema_dis, work?
+        # Feature matching loss, dis
         unl_feat = self.dis(unl_images, feat=True)
         unl_feat = Variable(unl_feat.detach().data, requires_grad=False)
         gen_feat = self.dis(gen_images, feat=True)
         fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
 
+        # e,g lab loss
+        lab_feat = self.dis(lab_images, feat=True)
+        lab_feat = Variable(lab_feat.detach().data, requires_grad=False)
+        gel_feat = self.dis(gel_images, feat=True)
+        gl_loss = config.gl_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(lab_feat, 0)))
+
+        # g1, g2 fm loss
+        gg_loss = -1 * config.gg_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(gen_feat, 0)))
+
         # Generator loss
-        g_loss = fm_loss + config.vi_weight * vi_loss
+        g_loss = fm_loss + config.vi_weight * vi_loss + gl_loss + gg_loss
 
         self.gen_optimizer.zero_grad()
         self.enc_optimizer.zero_grad()
@@ -163,9 +181,10 @@ class Trainer(object):
             ('lab loss', lab_loss.data[0]),
             ('unl loss', unl_loss.data[0]),
             ('con loss', cons_loss.data[0]),
-            # ('c w loss', self.consistency_weight),
             ('fm loss', fm_loss.data[0]),
-            ('vi loss', vi_loss.data[0])
+            ('vi loss', vi_loss.data[0]),
+            ('gl loss', gl_loss.data[0]),
+            ('gg loss', gg_loss.data[0])
         ])
 
         return monitor_dict
@@ -232,14 +251,16 @@ class Trainer(object):
         noise = Variable(torch.Tensor(vis_size, self.config.noise_size).uniform_().cuda())
         gen_images = self.gen(noise)
 
-        save_path = os.path.join(self.config.save_dir, '{}.FM+VI.{}.png'.format(self.config.dataset, self.config.suffix))
-        vutils.save_image(gen_images.data.cpu(), save_path, normalize=True, range=(-1,1), nrow=10)
+        save_path = os.path.join(self.config.save_dir,
+                                 '{}.FM+VI.{}.png'.format(self.config.dataset, self.config.suffix))
+        vutils.save_image(gen_images.data.cpu(), save_path, normalize=True, range=(-1, 1), nrow=10)
 
     def param_init(self):
         def func_gen(flag):
             def func(m):
                 if hasattr(m, 'init_mode'):
                     setattr(m, 'init_mode', flag)
+
             return func
 
         images = []
@@ -261,11 +282,11 @@ class Trainer(object):
         logits = self.dis(Variable(images.cuda()))
         self.dis.apply(func_gen(False))
 
-    def calculate_remaining(self, t1, t2, epoch):   # ta
+    def calculate_remaining(self, t1, t2, epoch):  # ta
         progress = (epoch + 0.) / self.config.max_epochs
         elapsed_time = t2 - t1
         if (progress > 0):
-            remaining_time = elapsed_time * (1/progress) - elapsed_time
+            remaining_time = elapsed_time * (1 / progress) - elapsed_time
         else:
             remaining_time = 0
 
@@ -278,14 +299,14 @@ class Trainer(object):
         time_str = '| ' + time_str + '\n'
         return time_str
 
-    def save_model(self, net, net_label, epo_label):   # ta
+    def save_model(self, net, net_label, epo_label):  # ta
         save_filename = 'VI.{}_{}_net_{}.pth'.format(self.config.suffix, epo_label, net_label)
         save_path = os.path.join(self.config.save_dir, save_filename)
         torch.save(net.cpu().state_dict(), save_path)
         if torch.cuda.is_available():
             net.cuda()
 
-    def del_model(self, net_label, epo_label):   # ta
+    def del_model(self, net_label, epo_label):  # ta
         del_filename = 'VI.{}_{}_net_{}.pth'.format(self.config.suffix, epo_label, net_label)
         del_path = os.path.join(self.config.save_dir, del_filename)
         if os.path.exists(del_path):
@@ -293,7 +314,7 @@ class Trainer(object):
         else:
             print("The file does not exist, {}".format(del_path))
 
-    def save(self, epo_label):   # ta
+    def save(self, epo_label):  # ta
         # save new
         self.save_model(self.dis, 'D', epo_label)
         self.save_model(self.ema_dis, 'M', epo_label)
@@ -307,7 +328,7 @@ class Trainer(object):
             self.del_model('G', epo_label)
             self.del_model('E', epo_label)
 
-    def update_ema_variables(self, model, ema_model, alpha, global_step): # ta2
+    def update_ema_variables(self, model, ema_model, alpha, global_step):  # ta2
         # alpha: min of weight reservation, hp
         # global_step: history update step counts
         # Use the true average until the exponential average is more correct
@@ -378,7 +399,8 @@ class Trainer(object):
                 for k, v in monitor.items():
                     disp_str += ' | {}: {:.4f}'.format(k, v / config.eval_period)
 
-                disp_str += ' | [Eval] unl acc: {:.4f}, gen acc: {:.4f}, max unl acc: {:.4f}, max gen acc: {:.4f}'.format(unl_acc, gen_acc, max_unl_acc, max_gen_acc)
+                disp_str += ' | [Eval] unl acc: {:.4f}, gen acc: {:.4f}, max unl acc: {:.4f}, max gen acc: {:.4f}'.format(
+                    unl_acc, gen_acc, max_unl_acc, max_gen_acc)
                 disp_str += ' | lr: {:.5f}'.format(self.dis_optimizer.param_groups[0]['lr'])
                 disp_str += '\n'
 
@@ -389,20 +411,26 @@ class Trainer(object):
 
                 self.logger.write(disp_str)
                 sys.stdout.write(disp_str)
-                sys.stdout.write(time_str)   # ta
+                sys.stdout.write(time_str)  # ta
                 sys.stdout.flush()
 
             iter += 1
             self.iter_cnt += 1
 
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='cifarmn_trainer.py')
-    parser.add_argument('-suffix', default='mt0', type=str, help="Suffix added to the save images.")
+    cc = config.cifarmg_config()
+    parser = argparse.ArgumentParser(description='cifarmg_trainer.py')
+    parser.add_argument('-suffix', default='mg0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', dest='resume', action='store_true')
+    parser.add_argument('-consistency', default=cc.consistency, type=float,
+                        help="Consistency loss content")
+    parser.add_argument('-gl_weight', default=cc.gl_weight, type=float,
+                        help="gl loss content")
+    parser.add_argument('-gg_weight', default=cc.gg_weight, type=float,
+                        help="gg loss content")
     parser.set_defaults(resume=False)
     args = parser.parse_args()
 
-    trainer = Trainer(config.cifarmn_config(), args)
+    trainer = Trainer(cc, args)
     trainer.train()
-
-

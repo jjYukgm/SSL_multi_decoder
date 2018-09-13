@@ -126,7 +126,7 @@ class cifarh_config:
     vi_weight = 1e-2
 
 
-class cifarmn_config:
+class cifarmg_config:
     dataset = 'cifar'
     image_size = 3 * 32 * 32
     num_label = 10
@@ -151,11 +151,13 @@ class cifarmn_config:
 
     max_epochs = 500    # 1200
     vi_weight = 1e-2
+    gl_weight = 1e-2    # #lab / #unl: 4k / 50k
+    gg_weight = 1e-2    # #lab / #unl: 4k / 50k
 
     ema_decay = 0.99
     consistency_type = 'mse'    # mse; kl
-    consistency = 100.0
-    consistency_rampup = 20
+    consistency = 10.0
+    consistency_rampup = 5
     momentum = 0.9
     weight_decay = 2e-4
     nesterov = True  # use nesterov momentum
@@ -188,7 +190,7 @@ class cifarmt_config:
 
     ema_decay = 0.99
     consistency_type = 'mse'    # mse; kl
-    consistency = 75.0
+    consistency = 50.0
     consistency_rampup = 5
     momentum = 0.9
     weight_decay = 2e-4
