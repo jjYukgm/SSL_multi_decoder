@@ -19,7 +19,10 @@ from collections import OrderedDict
 import numpy as np
 from utils import *
 import losses, ramps
+import random
 import pdb
+
+
 # pdb.set_trace()
 # pdb.set_trace = lambda: None
 
@@ -45,11 +48,11 @@ class Trainer(object):
         self.gen = model.Generator(image_size=config.image_size, noise_size=config.noise_size).cuda()
         self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
 
-        # self.dis_optimizer = optim.Adam(self.dis.parameters(), lr=config.dis_lr, betas=(0.5, 0.999))
-        self.dis_optimizer = optim.SGD(self.dis.parameters(), lr=config.dis_lr,
-                                       momentum=config.momentum,
-                                       weight_decay=config.weight_decay,
-                                       nesterov=config.nesterov)
+        self.dis_optimizer = optim.Adam(self.dis.parameters(), lr=config.dis_lr, betas=(0.5, 0.999))
+        # self.dis_optimizer = optim.SGD(self.dis.parameters(), lr=config.dis_lr,
+        #                                momentum=config.momentum,
+        #                                weight_decay=config.weight_decay,
+        #                                nesterov=config.nesterov)
         self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
         self.enc_optimizer = optim.Adam(self.enc.parameters(), lr=config.enc_lr, betas=(0.0, 0.999))
 
@@ -117,12 +120,28 @@ class Trainer(object):
         unl_loss = true_loss + fake_loss
 
         # ema consistency loss
-        cons_loss = self.consistency_weight * \
-                    (  self.consistency_criterion(lab_logits, ema_lab_logits)  \
-                     + self.consistency_criterion(unl_logits, ema_unl_logits)) \
-                    / (self.config.train_batch_size + self.config.train_batch_size_2)
+        cons_loss = self.consistency_weight * config.con_coef * \
+                    (self.consistency_criterion(lab_logits, ema_lab_logits) +
+                     self.consistency_criterion(unl_logits, ema_unl_logits)) \
+                    / (config.train_batch_size + config.train_batch_size_2)
 
-        d_loss = lab_loss + unl_loss + cons_loss
+        # neighbor loss
+        ema_tot_logits = torch.cat((ema_lab_logits, ema_unl_logits), dim=0)
+        tot_feat = torch.cat((self.ema_dis(lab_images, feat=True), self.ema_dis(unl_images, feat=True)), dim=0)
+        inds = torch.randperm(tot_feat.size(0)).cuda()
+        # pdb.set_trace()
+        ema_tot_logits = ema_tot_logits[inds]
+        tot_feat = tot_feat[inds]
+        _, ema_lbl = torch.max(ema_tot_logits, 1)
+        diff = tot_feat[:config.train_batch_size] - tot_feat[config.train_batch_size:]
+        diff = torch.sqrt(torch.mean(diff ** 2, 1))
+        nei_mask = torch.eq(ema_lbl[:config.train_batch_size], ema_lbl[config.train_batch_size:]).float()  # nei or not
+        pos = nei_mask * diff
+        neg = (1 - nei_mask) * (torch.max(config.nei_margin - diff, Variable(torch.zeros(diff.size())).cuda()) ** 2)
+        nei_loss = self.consistency_weight * config.nei_coef * \
+                   (torch.mean(pos + neg))
+
+        d_loss = lab_loss + unl_loss + cons_loss + nei_loss
 
         ##### Monitoring (train mode)
         # true-fake accuracy
@@ -140,10 +159,11 @@ class Trainer(object):
         noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
         gen_images = self.gen(noise)
         mu, sig = self.enc(lab_images)
-        # pdb.set_trace()
-        tdn = torch.distributions.Normal(mu.mean(0).unsqueeze(0), sig.mean(0).unsqueeze(0))
-        enc_noise = torch.cat([tdn.sample() for i in range(lab_images.size(0))])
-        gel_images = self.gen(enc_noise)
+        enc_noise2 = mu + sig * Variable(torch.normal(0, torch.ones(sig.size()))).cuda()
+        gel_images = self.gen(enc_noise2)
+        mu, sig = self.enc(unl_images)
+        enc_noise3 = mu + sig * Variable(torch.normal(0, torch.ones(sig.size()))).cuda()
+        geu_images = self.gen(enc_noise3)
 
         # Entropy loss via variational inference
         mu, log_sigma = self.enc(gen_images)
@@ -155,17 +175,24 @@ class Trainer(object):
         gen_feat = self.dis(gen_images, feat=True)
         fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
 
-        # e,g lab loss
+        # e,g real image feat loss
         lab_feat = self.dis(lab_images, feat=True)
         lab_feat = Variable(lab_feat.detach().data, requires_grad=False)
         gel_feat = self.dis(gel_images, feat=True)
-        gl_loss = config.gl_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(lab_feat, 0)))
+        geu_feat = self.dis(geu_images, feat=True)
+        lab_feat = torch.cat((lab_feat, unl_feat), dim=0)
+        geu_feat = torch.cat((gel_feat, geu_feat), dim=0)
+        gf_loss = torch.norm(geu_feat - lab_feat, 2) / gel_feat.nelement()  # (1/d)*norm(diff)
+        gf_loss = config.gf_weight * torch.mean(gf_loss)  #
 
-        # g1, g2 fm loss
-        gg_loss = -1 * config.gg_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(gen_feat, 0)))
+        # g1, g2 neg fm loss
+        # gg_loss = -1 * config.gg_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(gen_feat, 0)))
+        gg_loss = torch.norm(gel_feat - gen_feat, 2) / gel_feat.nelement()  # t.norm: abs + norm
+        gg_loss = config.gg_margin - torch.mean(gg_loss)
+        gg_loss = config.gg_weight * torch.max(gg_loss, Variable(torch.zeros(gg_loss.size())).cuda())[0]
 
         # Generator loss
-        g_loss = fm_loss + config.vi_weight * vi_loss + gl_loss + gg_loss
+        g_loss = fm_loss + config.vi_weight * vi_loss + gf_loss + gg_loss
 
         self.gen_optimizer.zero_grad()
         self.enc_optimizer.zero_grad()
@@ -181,9 +208,10 @@ class Trainer(object):
             ('lab loss', lab_loss.data[0]),
             ('unl loss', unl_loss.data[0]),
             ('con loss', cons_loss.data[0]),
+            ('nei loss', nei_loss.data[0]),
             ('fm loss', fm_loss.data[0]),
             ('vi loss', vi_loss.data[0]),
-            ('gl loss', gl_loss.data[0]),
+            ('gf loss', gf_loss.data[0]),
             ('gg loss', gg_loss.data[0])
         ])
 
@@ -224,6 +252,8 @@ class Trainer(object):
 
     def eval(self, data_loader, max_batch=None, ema=False):
         if ema:
+            if self.consistency_weight == 0.:
+                return 0.
             dis = self.ema_dis
         else:
             dis = self.dis
@@ -328,21 +358,25 @@ class Trainer(object):
             self.del_model('G', epo_label)
             self.del_model('E', epo_label)
 
-    def update_ema_variables(self, model, ema_model, alpha, global_step):  # ta2
+    def update_ema_variables(self, model, ema_model, alpha, global_step, batch_per_epoch):  # ta2
         # alpha: min of weight reservation, hp
         # global_step: history update step counts
         # Use the true average until the exponential average is more correct
+        if self.consistency_weight == 0.:
+            return
         alpha = min(1 - 1 / (global_step + 1), alpha)
+        if self.config.t_forget \
+                and (global_step / batch_per_epoch) % (self.config.c_rampup * self.config.t_forget_coef) == 0:
+            alpha = 0.
         for ema_param, param in zip(ema_model.parameters(), model.parameters()):
             ema_param.data.mul_(alpha).add_(1 - alpha, param.data)
 
     def get_current_consistency_weight(self, epoch):
         # Consistency ramp-up from https://arxiv.org/abs/1610.02242
-        if epoch == 0.:
+        if epoch < self.config.t_start:
             self.consistency_weight = 0.
         else:
-            self.consistency_weight = self.config.consistency \
-                                      * ramps.sigmoid_rampup(epoch, self.config.consistency_rampup)
+            self.consistency_weight = ramps.sigmoid_rampup(epoch, self.config.c_rampup)
 
     def train(self):
         config = self.config
@@ -371,7 +405,7 @@ class Trainer(object):
 
             self.get_current_consistency_weight(iter / batch_per_epoch)
             iter_vals = self._train()
-            self.update_ema_variables(self.dis, self.ema_dis, self.config.ema_decay, iter)
+            self.update_ema_variables(self.dis, self.ema_dis, self.config.ema_decay, iter, batch_per_epoch)
 
             if len(monitor.keys()) == 0:
                 for k in iter_vals.keys():
@@ -387,6 +421,9 @@ class Trainer(object):
             if iter % config.eval_period == 0:
                 train_loss, train_incorrect = self.eval(self.labeled_loader)
                 dev_loss, dev_incorrect = self.eval(self.dev_loader)
+                ema_result = self.eval(self.dev_loader, ema=True)
+                if isinstance(ema_result, tuple):
+                    ema_train_result = self.eval(self.labeled_loader, ema=True)
 
                 unl_acc, gen_acc, max_unl_acc, max_gen_acc = self.eval_true_fake(self.dev_loader, 10)
 
@@ -396,6 +433,11 @@ class Trainer(object):
 
                 disp_str = '#{}\ttrain: {:.4f}, {:.4f} | dev: {:.4f}, {:.4f} | best: {:.4f}'.format(
                     iter, train_loss, train_incorrect, dev_loss, dev_incorrect, min_dev_incorrect)
+                if isinstance(ema_result, tuple):
+                    disp_str += ' | ema: {:.4f}, {:.4f}'.format(ema_train_result[1], ema_result[1])
+                else:
+                    disp_str += ' | ema:   None ,   None'
+
                 for k, v in monitor.items():
                     disp_str += ' | {}: {:.4f}'.format(k, v / config.eval_period)
 
@@ -423,13 +465,29 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='cifarmg_trainer.py')
     parser.add_argument('-suffix', default='mg0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', dest='resume', action='store_true')
-    parser.add_argument('-consistency', default=cc.consistency, type=float,
+    parser.add_argument('-max_epochs', default=cc.max_epochs, type=int,
+                        help="max epoches")
+    parser.add_argument('-con_coef', default=cc.con_coef, type=float,
                         help="Consistency loss content")
-    parser.add_argument('-gl_weight', default=cc.gl_weight, type=float,
+    parser.add_argument('-nei_coef', default=cc.nei_coef, type=float,
+                        help="neighbor loss content")
+    parser.add_argument('-nei_margin', default=cc.nei_margin, type=float,
+                        help="neighbor margin content")
+    parser.add_argument('-c_rampup', default=cc.c_rampup, type=int,
+                        help="rampup period")
+    parser.add_argument('-t_forget', dest='t_forget', action='store_false')
+    parser.add_argument('-t_forget_coef', default=cc.t_forget_coef, type=float,
+                        help="teacher corget content * c_r")
+    parser.add_argument('-t_start', default=cc.t_start, type=int,
+                        help="teacher start calculate loss")
+    parser.add_argument('-gf_weight', default=cc.gf_weight, type=float,
                         help="gl loss content")
     parser.add_argument('-gg_weight', default=cc.gg_weight, type=float,
                         help="gg loss content")
+    parser.add_argument('-gg_margin', default=cc.gg_margin, type=float,
+                        help="gg margin content")
     parser.set_defaults(resume=False)
+    parser.set_defaults(t_forget=True)
     args = parser.parse_args()
 
     trainer = Trainer(cc, args)

@@ -74,8 +74,10 @@ class LossAccPlotter(object):
                  show_averages=True,
                  show_other_loss=False,
                  show_log_loss=False,
+                 fix_ylim=True,
                  show_loss_plot=True,
                  show_err_plot=True,
+                 show_ema_plot=False,
                  show_plot_window=True,
                  x_label="Epoch"):
         """Constructs the plotter.
@@ -114,8 +116,10 @@ class LossAccPlotter(object):
         self.show_averages = show_averages
         self.show_other_loss = show_other_loss
         self.show_log_loss = show_log_loss
+        self.fix_ylim = fix_ylim
         self.show_loss_plot = show_loss_plot
         self.show_err_plot = show_err_plot
+        self.show_ema_plot = show_ema_plot
         self.show_plot_window = show_plot_window
         self.save_to_filepath = save_to_filepath
         self.x_label = x_label
@@ -190,9 +194,13 @@ class LossAccPlotter(object):
         self.values_err_val = OrderedDict()
         if self.show_other_loss:
             self.other_loss = OrderedDict()
+        if self.show_ema_plot:
+            self.ema_value = OrderedDict()
 
-    def add_values(self, x_index, loss_train=None, loss_val=None, err_train=None,
-                   err_val=None, redraw=True, other_loss=None):
+    def add_values(self, x_index, loss_train=None, loss_val=None,
+                   err_train=None, err_val=None,
+                   ema_err_train=None, ema_err_val=None,
+                   redraw=True, other_loss=None):
         """Function to add new values for each line for a specific x-value (e.g.
         a specific epoch).
 
@@ -242,7 +250,18 @@ class LossAccPlotter(object):
                     self.other_loss[key] = OrderedDict()
             for key, val in other_loss.items():
                 val2 = ignore_nan_and_inf(val, key, x_index)
-                self.other_loss[key][x_index] = val2
+                if val2 is not None:
+                    self.other_loss[key][x_index] = val2
+        if self.show_ema_plot and x_index == 0.:
+            self.ema_value["ema train"] = OrderedDict()
+            self.ema_value["ema val"] = OrderedDict()
+        if self.show_ema_plot and ema_err_train is not None:
+            ema_err_train = ignore_nan_and_inf(ema_err_train, "ema train", x_index)
+            ema_err_val = ignore_nan_and_inf(ema_err_val, "ema val", x_index)
+            if ema_err_train is not None:
+                self.ema_value["ema train"][x_index] = ema_err_train
+            if ema_err_val is not None:
+                self.ema_value["ema val"][x_index] = ema_err_val
 
         if loss_train is not None:
             self.values_loss_train[x_index] = loss_train
@@ -297,8 +316,13 @@ class LossAccPlotter(object):
         if self.ax_loss is not None:
             if self.show_log_loss:  # semilogy; plot
                 self.ax1_plot = self.ax_loss.semilogy
+                # self.ax_loss.set_ylim([1e-3, 10.])
             else:
                 self.ax1_plot = self.ax_loss.plot
+                # self.ax_loss.set_ylim([0., 1.])
+
+        # if self.ax_err is not None:
+        #     self.ax_err.set_ylim([0., 1.])
 
         # set_position is neccessary here in order to make space at the bottom
         # for the legend
@@ -361,6 +385,7 @@ class LossAccPlotter(object):
         self._redraw_averages()
         self._redraw_regressions()
         self._redraw_otherloss()
+        self._redraw_ema()
 
         # Add legends (below both chart)
         ncol = 1
@@ -391,6 +416,16 @@ class LossAccPlotter(object):
                        loc="upper center",
                        bbox_to_anchor=(0.5, -0.08),
                        ncol=ncol)
+
+        if self.fix_ylim:
+            if ax1:
+                if self.show_log_loss:  # semilogy; plot
+                    ax1.set_ylim([1e-3, 10.])
+                else:
+                    ax1.set_ylim([0., 3.])
+
+            if ax2:
+                ax2.set_ylim([0., 1.])
 
         plt.draw()
 
@@ -439,6 +474,32 @@ class LossAccPlotter(object):
             h_av, = ax2.plot(self.values_err_val.keys(), self.values_err_val.values(),
                              ls_err_val, label="err. val.", alpha=alpha_main)
             handles.extend([h_at, h_av])
+
+        return handles
+
+    def _redraw_ema(self):
+        """Draw the moving averages of each line.
+
+        If moving averages has been deactived in the constructor, this function
+        will do nothing.
+
+        Returns:
+            List of handles (one per line).
+        """
+        # abort if moving averages have been deactivated
+        if not self.show_ema_plot:
+            return []
+
+        handles = []
+        ax2 = self.ax_err
+        if not ax2:
+            return handles
+        # for loss chart
+        for key, od in self.ema_value.items():
+            # plot the xy-values
+            h_lt, = ax2.plot(od.keys(), od.values(),
+                             label=key)
+            handles.extend([h_lt])
 
         return handles
 

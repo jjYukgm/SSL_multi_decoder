@@ -151,13 +151,20 @@ class cifarmg_config:
 
     max_epochs = 500    # 1200
     vi_weight = 1e-2
-    gl_weight = 1e-2    # #lab / #unl: 4k / 50k
+    gf_weight = 1e-2    # #lab / #unl: 4k / 50k
     gg_weight = 1e-2    # #lab / #unl: 4k / 50k
+    gg_margin = 1.    # gg margin
 
     ema_decay = 0.99
     consistency_type = 'mse'    # mse; kl
-    consistency = 10.0
-    consistency_rampup = 5
+    con_coef = 10.0
+    nei_coef = 1.0
+    nei_margin = 1.0
+    c_rampup = 5    # consistency_rampup
+    t_forget = False
+    t_forget_coef = 2.
+    t_start = 70.
+
     momentum = 0.9
     weight_decay = 2e-4
     nesterov = True  # use nesterov momentum

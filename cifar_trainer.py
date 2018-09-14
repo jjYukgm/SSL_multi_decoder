@@ -88,8 +88,8 @@ class Trainer(object):
         unl_logsumexp = log_sum_exp(unl_logits)
         gen_logsumexp = log_sum_exp(gen_logits)
 
-        true_loss = - 0.5 * torch.mean(unl_logsumexp) + 0.5 * torch.mean(F.softplus(unl_logsumexp))
-        fake_loss = 0.5 * torch.mean(F.softplus(gen_logsumexp))
+        true_loss = - 0.5 * torch.mean(unl_logsumexp) + 0.5 * torch.mean(F.softplus(unl_logsumexp)) # t2 + t4
+        fake_loss = 0.5 * torch.mean(F.softplus(gen_logsumexp)) # t3
         unl_loss = true_loss + fake_loss
          
         d_loss = lab_loss + unl_loss

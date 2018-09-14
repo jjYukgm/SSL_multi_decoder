@@ -28,20 +28,10 @@ def calculate_remaining(t1, t2, i, total):
     time_str = '| ' + time_str
     return time_str
 
-def plot_loss_err(data, suffix, fi_len=None):
+def plot_loss_err(data, suffix, fi_len=None, ema=None):
     # plot_data = {'X': [], 'Y': [], 'legend': []}
     batch_per_epoch = int((50000 + 100 - 1) / 100) # in data_loader: unlabel_size = tr_size
     # batch_per_epoch /= 500  # vis_period
-    # plot settings
-    save_to_filepath = os.path.join("{}_log".format(data), "{}_plot_loss_err.png".format(suffix))
-    plotter = LossAccPlotter(title="{} loss over time".format(suffix),
-                             save_to_filepath=save_to_filepath,
-                             show_regressions=True,
-                             show_averages=True,
-                             show_loss_plot=True,
-                             show_err_plot=True,
-                             show_plot_window=False,
-                             x_label="Epoch")
     ## load loss data
     log_path = os.path.join('{}_log'.format(data), '{}.FM+VI.{}.txt'.format(data, suffix))
     log_file2 = open(log_path, "r")
@@ -52,11 +42,26 @@ def plot_loss_err(data, suffix, fi_len=None):
             li_or = li.split(" | ")
             if len(li_or) == 1:
                 continue
+            if ema is None and "ema" in li_or[3]:
+                ema = True
             fi_len += 1
         log_file2.seek(0)
         # print("file len: {}".format(fi_len))
-    i = 0
+        if not ema:
+            ema = False
 
+    # plot settings
+    save_to_filepath = os.path.join("{}_log".format(data), "{}_plot_loss_err.png".format(suffix))
+    plotter = LossAccPlotter(title="{} loss over time".format(suffix),
+                             save_to_filepath=save_to_filepath,
+                             show_regressions=True,
+                             show_averages=True,
+                             show_loss_plot=True,
+                             show_err_plot=True,
+                             show_ema_plot=ema,
+                             show_plot_window=False,
+                             x_label="Epoch")
+    i = 0
     for li in log_file2:
         li_or = li.split(" | ")
         if len(li_or) == 1:
@@ -66,11 +71,21 @@ def plot_loss_err(data, suffix, fi_len=None):
         err_train = float(li_or[0].split(",")[1])
         loss_val = float(li_or[1].split(":")[1].split(",")[0])
         err_val = float(li_or[1].split(",")[1])
+        ema_err_train = ema_err_val = None
+        if ema:
+            ema_err_train = li_or[3].split(":")[1].split(",")[0]
+            ema_err_val = li_or[3].split(",")[1]
+            if "None" not in ema_err_train:
+                ema_err_train = float(ema_err_train)
+                ema_err_val = float(ema_err_val)
+            else:
+                ema_err_train = ema_err_val = None
 
         float_epoch = float(iter) / batch_per_epoch
         plotter.add_values(float_epoch,
                            loss_train=loss_train, loss_val=loss_val,
                            err_train=err_train, err_val=err_val,
+                           ema_err_train=ema_err_train, ema_err_val=ema_err_val,
                            redraw=False)
         i += 1
         time_str = "{}\r".format(calculate_remaining(st_time, time.time(), i, fi_len))
@@ -80,9 +95,9 @@ def plot_loss_err(data, suffix, fi_len=None):
     log_file2.close()
     plotter.redraw()    # save as image
     # plotter.block()
-    return fi_len
+    return fi_len, ema
 
-def plot_losses(data, suffix, fi_len=None):
+def plot_losses(data, suffix, fi_len=None, ema=None):
     # plot_data = {'X': [], 'Y': [], 'legend': []}
     batch_per_epoch = int((50000 + 100 - 1) / 100) # in data_loader: unlabel_size = tr_size
     # batch_per_epoch /= 500  # vis_period
@@ -110,9 +125,13 @@ def plot_losses(data, suffix, fi_len=None):
             li_or = li.split(" | ")
             if len(li_or) == 1:
                 continue
+            if ema is None and "ema" in li_or[3]:
+                ema = True
             fi_len += 1
         log_file2.seek(0)
         # print("file len: {}".format(fi_len))
+        if not ema:
+            ema = False
     i = 0
     for li in log_file2:
         li_or = li.split(" | ")
@@ -124,7 +143,7 @@ def plot_losses(data, suffix, fi_len=None):
         loss_val = float(li_or[1].split(":")[1].split(",")[0])
         err_val = float(li_or[1].split(",")[1])
         for li2 in li_or:
-            if not "loss" in li2:
+            if "loss" not in li2:
                 continue
             # pdb.set_trace()
             key = li2.split(": ")[0]
@@ -148,7 +167,7 @@ def plot_losses(data, suffix, fi_len=None):
     log_file2.close()
     plotter.redraw()    # save as image
     # plotter.block()
-    return fi_len
+    return fi_len, ema
 
 def main():
     if len(sys.argv) < 3: # 1
@@ -158,8 +177,8 @@ def main():
     data_name = sys.argv[1]
     suffix_name = sys.argv[2]
 
-    fi_len = plot_loss_err(data_name, suffix_name)
-    plot_losses(data_name, suffix_name, fi_len=fi_len)
+    fi_len, ema = plot_loss_err(data_name, suffix_name)
+    plot_losses(data_name, suffix_name, fi_len=fi_len, ema=ema)
 
 
 if __name__ == "__main__":
