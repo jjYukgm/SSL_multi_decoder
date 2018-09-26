@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from torchvision.datasets import MNIST, SVHN, CIFAR10, CIFAR100
 from torchvision import transforms
+import os
 import torchvision.utils as vutils
 
 class DataLoader(object):
@@ -122,10 +123,43 @@ def get_svhn_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
-def get_cifar_loaders(config):
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+def get_cifar_loaders_test(config, lab_ind=False):
+    tr_list = []
+    if config.double_input_size:    # resize
+        tr_list.append(transforms.Scale(64))
+    tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    transform = transforms.Compose(tr_list)
     training_set = CIFAR10('cifar', train=True, download=True, transform=transform)
     dev_set = CIFAR10('cifar', train=False, download=True, transform=transform)
+
+    indices = np.arange(len(training_set))
+    unlabeled_indices = indices
+    unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
+    dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
+
+    ind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind'.format(config.dataset, config.suffix))
+    if lab_ind and os.path.exists(ind_path):
+        labeled_indices = np.load(ind_path)
+        print("Find lab_ind!")
+        labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
+        return unlabeled_loader, dev_loader, labeled_loader
+    return unlabeled_loader, dev_loader
+
+def get_cifar_loaders(config):
+    tr_list = []
+    if config.flip:
+        tr_list.append(transforms.RandomHorizontalFlip())
+    if config.double_input_size:    # resize
+        tr_list.append(transforms.Scale(64))
+    tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    transform = transforms.Compose(tr_list)
+    tr_list = []
+    if config.double_input_size:    # resize
+        tr_list.append(transforms.Scale(64))
+    tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    transform2 = transforms.Compose(tr_list)
+    training_set = CIFAR10('cifar', train=True, download=True, transform=transform)
+    dev_set = CIFAR10('cifar', train=False, download=True, transform=transform2)
 
     indices = np.arange(len(training_set))
     np.random.shuffle(indices)
@@ -146,6 +180,9 @@ def get_cifar_loaders(config):
     for i in range(10):
         special_set.append(training_set[indices[np.where(labels==i)[0][0]]][0])
     special_set = torch.stack(special_set)
+    # save label indices
+    ind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind'.format(config.dataset, config.suffix))
+    np.save(ind_path, labeled_indices)
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 

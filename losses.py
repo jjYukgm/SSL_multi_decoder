@@ -8,6 +8,7 @@
 """Custom loss functions"""
 
 import torch
+from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Variable
 
@@ -52,3 +53,19 @@ def symmetric_mse_loss(input1, input2):
     assert input1.size() == input2.size()
     num_classes = input1.size()[1]
     return torch.sum((input1 - input2)**2) / num_classes
+
+class FocalLoss(nn.Module):
+    """Ref: https://github.com/ronghuaiyang/arcface-pytorch/
+
+    """
+    def __init__(self, gamma=0, eps=1e-7):
+        super(FocalLoss, self).__init__()
+        self.gamma = gamma
+        self.eps = eps
+        self.ce = torch.nn.CrossEntropyLoss()
+
+    def forward(self, input, target):
+        logp = self.ce(input, target)
+        p = torch.exp(-logp)
+        loss = (1 - p) ** self.gamma * logp
+        return loss.mean()
