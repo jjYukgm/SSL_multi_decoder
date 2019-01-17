@@ -43,10 +43,11 @@ class DataLoader(object):
             images = images.view(images.size(0), -1)
         self.images = torch.mm(images, components.transpose(0, 1)).cpu()
 
-    def generator(self, inf=False):
+    def generator(self, inf=False, shuffle=True):
         while True:
             indices = np.arange(self.images.size(0))
-            np.random.shuffle(indices)
+            if shuffle:
+                np.random.shuffle(indices)
             indices = torch.from_numpy(indices)
             for start in range(0, indices.size(0), self.batch_size):
                 end = min(start + self.batch_size, indices.size(0))
@@ -57,8 +58,8 @@ class DataLoader(object):
     def next(self):
         return next(self.unlimit_gen)
 
-    def get_iter(self):
-        return self.generator()
+    def get_iter(self, shuffle=True):
+        return self.generator(shuffle=shuffle)
 
     def __len__(self):
         return self.len
@@ -123,7 +124,7 @@ def get_svhn_loaders(config):
 
     return labeled_loader, unlabeled_loader, unlabeled_loader2, dev_loader, special_set
 
-def get_cifar_loaders_test(config, lab_ind=False):
+def get_cifar_loaders_test(config, lab_ind=True):
     tr_list = []
     if config.double_input_size:    # resize
         tr_list.append(transforms.Scale(64))
@@ -137,24 +138,26 @@ def get_cifar_loaders_test(config, lab_ind=False):
     unlabeled_loader = DataLoader(config, training_set, unlabeled_indices, config.train_batch_size_2)
     dev_loader = DataLoader(config, dev_set, np.arange(len(dev_set)), config.dev_batch_size)
 
-    ind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind'.format(config.dataset, config.suffix))
+    ind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind.npy'.format(config.dataset, config.suffix))
     if lab_ind and os.path.exists(ind_path):
         labeled_indices = np.load(ind_path)
         print("Find lab_ind!")
         labeled_loader = DataLoader(config, training_set, labeled_indices, config.train_batch_size)
         return unlabeled_loader, dev_loader, labeled_loader
+    else:
+        print("no lab_ind!")
     return unlabeled_loader, dev_loader
 
 def get_cifar_loaders(config):
     tr_list = []
-    if config.flip:
+    if hasattr(config, 'flip') and config.flip:
         tr_list.append(transforms.RandomHorizontalFlip())
-    if config.double_input_size:    # resize
+    if hasattr(config, 'double_input_size') and config.double_input_size:    # resize
         tr_list.append(transforms.Scale(64))
     tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     transform = transforms.Compose(tr_list)
     tr_list = []
-    if config.double_input_size:    # resize
+    if hasattr(config, 'double_input_size') and config.double_input_size:    # resize
         tr_list.append(transforms.Scale(64))
     tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     transform2 = transforms.Compose(tr_list)

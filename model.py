@@ -217,7 +217,7 @@ class Discriminative(thisModule):
         self.noise_size = config.noise_size
         self.num_label  = config.num_label
 
-        if config.double_input_size:
+        if hasattr(config, 'double_input_size') and config.double_input_size:
             self.side = 64
         else:
             self.side = 32
@@ -376,6 +376,99 @@ class Encoder(thisModule):
                 param = param
             own_state[name].copy_(param)
 
+class Encoder_skip(thisModule):
+    def __init__(self, n_channels, n_classes, large=False, upbilinear=True, skip_layer=5):
+        # n_channels: input channels; n_classes: output channels
+        super(Encoder_skip, self).__init__()    # cifar: 64 => 16
+        if large:
+            cnum = 32   # min channel num
+        else:
+            cnum = 64   # min channel num
+
+        self.downs = nn.Sequential()
+        self.downs.add_module(str(len(self.downs._modules)), inconv(n_channels, cnum))
+        in_  = [1, 2, 4, 8]
+        out_ = [2, 4, 8, 8]
+        for i in skip_layer:
+            self.downs.add_module(str(len(self.downs._modules)),
+                                  down(cnum*in_[i], cnum*out_[i]))
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, sqrt(2. / n))
+                if m.bias is not None:
+                    m.bias.data.zero_()
+                elif isinstance(m, nn.BatchNorm2d):
+                    m.weight.data.fill_(1)
+                    m.bias.data.zero_()
+
+    def forward(self, x, skips=False):
+        x = x * 0.5 + 0.5  # [-1, 1] -> [0, 1]
+        if skips:
+            x_tmp = []
+            for i in range(len(self.downs._modules)):
+                x = self.downs[i](x)
+                x_tmp.append(x)
+            return x_tmp
+        else:
+            x = self.downs(x)
+            return x
+
+class Decoder_skip(thisModule):
+    def __init__(self, n_channels, n_classes, large=False, upbilinear=True, skip_layer=5):
+        # n_channels: input channels; n_classes: output channels
+        super(Decoder_skip, self).__init__()    # cifar: 64 => 16
+        if large:
+            cnum = 32   # min channel num
+        else:
+            cnum = 64   # min channel num
+
+        self.ups = nn.Sequential()
+        in_ =  [16, 8, 4, 2]
+        out_ = [4, 2, 1, 1]
+        for i in skip_layer:
+            self.downs.add_module(str(len(self.ups._modules)),
+                                  up(cnum*in_[i], cnum*out_[i], bilinear=upbilinear))
+        self.ups.add_module(str(len(self.ups._modules)), WN_Conv2d(cnum, n_classes, 1))
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, sqrt(2. / n))
+                if m.bias is not None:
+                    m.bias.data.zero_()
+                elif isinstance(m, nn.BatchNorm2d):
+                    m.weight.data.fill_(1)
+                    m.bias.data.zero_()
+
+    def forward(self, x_tmp):
+        # x = x * 0.5 + 0.5  # [-1, 1] -> [0, 1]
+        # add randoms
+        # x_tmp[-1]
+        max_len = len(self.ups._modules)
+        x = x_tmp[max_len-1]
+        for i in range(max_len-1):
+            x = self.ups[i](x, x_tmp[max_len-i-2])
+        x = self.ups[max_len-1](x)
+
+        # x1 = self.inc(x)
+        # x2 = self.down1(x1)
+        # x3 = self.down2(x2)
+        # x4 = self.down3(x3)
+        # x5 = self.down4(x4)
+        # x = self.up1(x5, x4)
+        # x = self.up2(x, x3)
+        # x = self.up3(x, x2)
+        # x = self.up4(x, x1)
+        # x = self.outc(x)
+        x = F.sigmoid(x) * 2. - 1. # [0, 1] -> [-1, 1]
+        return x
+
 class UNet(thisModule):
     def __init__(self, n_channels, n_classes, large=False, upbilinear=True):
         # n_channels: input channels; n_classes: output channels
@@ -394,6 +487,7 @@ class UNet(thisModule):
         self.up3 = up(cnum*4,  cnum, bilinear=upbilinear)
         self.up4 = up(cnum*2,  cnum, bilinear=upbilinear)
         self.outc = WN_Conv2d(cnum, n_classes, 1)
+        self._initialize_weights()
 
     def _initialize_weights(self):
         for m in self.modules():

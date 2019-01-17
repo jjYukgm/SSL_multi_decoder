@@ -341,12 +341,16 @@ class Trainer(object):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='cifar_trainer.py')
+    cc = config.cifar_config()
     parser.add_argument('-suffix', default='run0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', default='', type=str, help="Suffix added to the save images.")
+    parser.add_argument('-max_epochs', default=cc.max_epochs, type=int,
+                        help="max epoches")
+    parser.add_argument('-ld', '--size_labeled_data', default=cc.size_labeled_data, type=int,
+                        help="labeled data num")
 
     args = parser.parse_args()
-
-    trainer = Trainer(config.cifar_config(), args)
+    trainer = Trainer(cc, args)
     trainer.train()
 
 

@@ -157,11 +157,13 @@ class cifarmg_config:
     dl_weight = 1.    # dis lab loss
     du_weight = 1.    # dis unlabeled loss
     dg_weight = 1.    # dis gen loss
+    dgl_weight = 0.    # dis gen lab loss
     da_weight = 0.    # dis arcface loss
     dt_weight = 0.    # dis triple loss; no d in dis_mode no tri
     ut_weight = 0.    # dis triple gan loss; no d in dis_mode no tri
     tv_weight = 1.    # tv
     st_weight = 0.    # style loss
+    gl_weight = 0.    # gen label loss
     im_weight = 0.    # unl m loss
     cim_weight = 0.    # cosine unl m loss
     il_weight = 0.    # lab loss

@@ -48,7 +48,8 @@ class Trainer(object):
         self.ema_dis = model.Discriminative(config).cuda() # , ema=True).cuda()
         # for param in self.ema_dis.parameters():
         #     param.detach_()
-        self.gen = model.generator(image_size=config.image_size, noise_size=config.noise_size, large=config.double_input_size, gen_mode=config.gen_mode).cuda()
+        if config.gen_mode != "non":
+            self.gen = model.generator(image_size=config.image_size, noise_size=config.noise_size, large=config.double_input_size, gen_mode=config.gen_mode).cuda()
 
         dis_para = [{'params': self.dis.parameters()},]
         if 'm' in config.dis_mode:  # svhn: 168; cifar:192
@@ -63,13 +64,14 @@ class Trainer(object):
         #                                momentum=config.momentum,
         #                                weight_decay=config.weight_decay,
         #                                nesterov=config.nesterov)
-        if config.gop == 'SGD':
-            self.gen_optimizer = optim.SGD(self.gen.parameters(), lr=config.gen_lr,
-                                           momentum=config.momentum,
-                                           weight_decay=config.weight_decay,
-                                           nesterov=config.nesterov)
-        else:
-            self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
+        if hasattr(self, 'gen'):
+            if config.gop == 'SGD':
+                self.gen_optimizer = optim.SGD(self.gen.parameters(), lr=config.gen_lr,
+                                               momentum=config.momentum,
+                                               weight_decay=config.weight_decay,
+                                               nesterov=config.nesterov)
+            else:
+                self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
         if config.gen_mode == "z2i":
             self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
             self.enc_optimizer = optim.Adam(self.enc.parameters(), lr=config.enc_lr, betas=(0.0, 0.999))
@@ -148,9 +150,9 @@ class Trainer(object):
         config = self.config
         self.dis.train()
         self.ema_dis.train()
-        self.gen.train()
-        if config.gen_mode == "z2i": self.enc.train()
         if config.dis_double: self.dis_dou.train()
+        if hasattr(self, 'gen'): self.gen.train()
+        if config.gen_mode == "z2i": self.enc.train()
         # if 'm' in config.dis_mode: self.metric_fc.train()
 
         ##### train Dis
@@ -160,9 +162,19 @@ class Trainer(object):
         unl_images, _ = self.unlabeled_loader.next()
         unl_images = Variable(unl_images.cuda())
         gen_images = None
+        gla_images = None
         if config.gen_mode == "z2i":
             noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
             gen_images = self.gen(noise)
+            if config.gl_weight > 0:    # gen z label
+                gla_labels = torch.Tensor(range(config.num_label))
+                gla_labels = gla_labels.unsqueeze(1).repeat(1, config.train_batch_size_2 / config.num_label).view(-1).long()
+                labels_oh = Variable(torch.zeros(config.train_batch_size_2, config.num_label).scatter_(1, gla_labels.unsqueeze(1), 1).cuda())
+                if config.dgl_weight > 0:
+                    lab_noise = Variable(torch.Tensor(config.train_batch_size_2, config.noise_size - config.num_label).uniform_().cuda())
+                    lab_noise = torch.cat((labels_oh, lab_noise), dim=1)
+                    gla_images = self.gen(lab_noise)
+                gla_labels = Variable(gla_labels.cuda())
         if config.gen_mode == "i2i":
             gen_images = self.gen(unl_images)
 
@@ -175,11 +187,13 @@ class Trainer(object):
         nei_loss = 0
         tri_loss = 0
         ult_loss = 0
+        dgl_loss = 0
         lab_feat = self.dis(lab_images, feat=True)
         unl_feat = self.dis(unl_images, feat=True)
-        gen_feat = self.dis(gen_images.detach(), feat=True)
         unl_logits = self.dis.out_net(unl_feat)
-        gen_logits = self.dis.out_net(gen_feat)
+        if gen_images is not None:
+            gen_feat = self.dis(gen_images.detach(), feat=True)
+            gen_logits = self.dis.out_net(gen_feat)
         if 'd' in config.dis_mode:
             lab_logits = self.dis.out_net(lab_feat)
             lab_loss += self.d_criterion(lab_logits, lab_labels)
@@ -200,10 +214,16 @@ class Trainer(object):
 
         # GAN true-fake loss: sumexp(logits) is seen as the input to the sigmoid
         unl_logsumexp = log_sum_exp(unl_logits)
-        gen_logsumexp = log_sum_exp(gen_logits)
+        if gen_images is not None:
+            gen_logsumexp = log_sum_exp(gen_logits)
 
         true_loss = - 0.5 * torch.mean(unl_logsumexp) + 0.5 * torch.mean(F.softplus(unl_logsumexp))
-        fake_loss = 0.5 * torch.mean(F.softplus(gen_logsumexp))
+        fake_loss = 0
+        if gen_images is not None:
+            fake_loss = 0.5 * torch.mean(F.softplus(gen_logsumexp))
+        if gla_images is not None and config.dgl_weight > 0:
+            gla_logits = self.dis(gla_images.detach())
+            dgl_loss -= self.consistency_weight * config.dgl_weight * self.d_criterion(gla_logits, gla_labels)
         unl_loss = config.du_weight * true_loss
         if self.dg_flag:
             unl_loss += config.dg_weight * fake_loss
@@ -279,15 +299,16 @@ class Trainer(object):
 
 
 
-        d_loss = lab_loss + unl_loss + cons_loss + nei_loss + arc_loss + lab_loss2 + tri_loss + ult_loss
+        d_loss = lab_loss + unl_loss + cons_loss + nei_loss + arc_loss + lab_loss2 + tri_loss + ult_loss + dgl_loss
 
         ##### Monitoring (train mode)
         # true-fake accuracy
         unl_acc = torch.mean(nn.functional.sigmoid(unl_logsumexp.detach()).gt(0.5).float())
-        gen_acc = torch.mean(nn.functional.sigmoid(gen_logsumexp.detach()).gt(0.5).float())
         # top-1 logit compared to 0: to verify Assumption (2) and (3)
         max_unl_acc = torch.mean(unl_logits.max(1)[0].detach().gt(0.0).float())
-        max_gen_acc = torch.mean(gen_logits.max(1)[0].detach().gt(0.0).float())
+        if gen_images is not None:
+            gen_acc = torch.mean(nn.functional.sigmoid(gen_logsumexp.detach()).gt(0.5).float())
+            max_gen_acc = torch.mean(gen_logits.max(1)[0].detach().gt(0.0).float())
 
         self.dis_optimizer.zero_grad()
         d_loss.backward()
@@ -298,13 +319,16 @@ class Trainer(object):
         gf_loss = 0
         tv_loss = 0
         st_loss = 0
+        gl_loss = 0
         im_loss = 0
         cim_loss = 0
         il_loss = 0
-        unl_feat = Variable(unl_feat.detach().data, requires_grad=False)
+        if hasattr(self, 'gen'):
+            unl_feat = Variable(unl_feat.detach().data, requires_grad=False)
         if config.gen_mode == "z2i":
-            # noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
-            # gen_images = self.gen(noise)
+            # instead of using just trained g_img
+            noise = Variable(torch.Tensor(unl_images.size(0), config.noise_size).uniform_().cuda())
+            gen_images = self.gen(noise)
 
             # Entropy loss via variational inference
             mu, log_sigma = self.enc(gen_images)
@@ -325,6 +349,27 @@ class Trainer(object):
                 mean_diff = torch.mean(geu_feat, 0) - torch.mean(lab_feat, 0)  # diff_mean
                 mean_diff = torch.norm(mean_diff, 2) / mean_diff.nelement()  # (1/d)*norm(diff)
                 gf_loss = self.consistency_weight * config.gf_weight * torch.mean(mean_diff)  # add con weight
+
+            if config.gl_weight > 0:    # gen z lab loss
+                assert config.train_batch_size_2 % config.num_label == 0, "mod(bsize, num_labels) is not 0"
+                # label
+                # labels = torch.Tensor(range(config.num_label))
+                # labels = labels.unsqueeze(1).repeat(1, config.train_batch_size_2 / config.num_label).view(-1).long()
+                # labels_oh = Variable(torch.zeros(config.train_batch_size_2, config.num_label).scatter_(1, labels.unsqueeze(1), 1).cuda())
+                lab_noise = Variable(torch.Tensor(config.train_batch_size_2, config.noise_size - config.num_label).uniform_().cuda())
+                lab_noise = torch.cat((labels_oh, lab_noise), dim=1)
+                gla_images = self.gen(lab_noise)
+                gl_feat = self.dis(gla_images, feat=True)
+                gl_logits = self.dis.out_net(gl_feat)
+                if config.dis_double:
+                    gl_logits += self.dis_dou.out_net2(gl_feat)
+                    if config.dis_triple:
+                        gl_logits += self.dis_dou.out_net3(gl_feat)
+                        gl_logits /= 3
+                    else:
+                        gl_logits /= 2
+                gl_loss = config.gf_weight * self.d_criterion(gl_logits, gla_labels)
+
         if config.gen_mode == "i2i":
             # gel_images = self.gen(lab_images)
             # gen_images = self.gen(unl_images)
@@ -352,68 +397,75 @@ class Trainer(object):
                     il_loss += self.m_criterion(lab_logits, lab_labels)
                 il_loss *= config.il_weight
 
-        # Feature matching loss, dis
-        gen_feat = self.dis(gen_images, feat=True)
-        if "z2i" in config.gen_mode:
-            fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
-        else:
-            fm_loss = torch.mean(torch.abs(gen_feat - unl_feat))
+        if hasattr(self, 'gen'):
+            # Feature matching loss, dis
+            gen_feat = self.dis(gen_images, feat=True)
+            if "z2i" in config.gen_mode:
+                fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
+            else:
+                fm_loss = torch.mean(torch.abs(gen_feat - unl_feat))
 
-        # # g1, g2 neg fm loss
-        # # gg_loss = -1 * config.gg_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(gen_feat, 0)))
-        # gg_loss = torch.norm(gel_feat - gen_feat, 2) / gel_feat.nelement()  # t.norm: abs + norm
-        # gg_loss = config.gg_margin - torch.mean(gg_loss)
-        # gg_loss = config.gg_weight * torch.max(gg_loss, Variable(torch.zeros(gg_loss.size())).cuda())[0]
+            # # g1, g2 neg fm loss
+            # # gg_loss = -1 * config.gg_weight * torch.mean(torch.abs(torch.mean(gel_feat, 0) - torch.mean(gen_feat, 0)))
+            # gg_loss = torch.norm(gel_feat - gen_feat, 2) / gel_feat.nelement()  # t.norm: abs + norm
+            # gg_loss = config.gg_margin - torch.mean(gg_loss)
+            # gg_loss = config.gg_weight * torch.max(gg_loss, Variable(torch.zeros(gg_loss.size())).cuda())[0]
 
-        # tv losss
-        if config.tv_weight > 0:
-            (_, c_x, h_x, w_x) = gen_images.size()
-            # c_x = gen_images.size()[1]
-            # h_x = gen_images.size()[2]
-            # w_x = gen_images.size()[3]
-            count_h = c_x * (h_x - 1) * w_x
-            count_w = c_x * h_x * (w_x - 1)
-            h_tv = torch.pow((gen_images[:, :, 1:, :] - gen_images[:, :, :-1, :]), 2).sum()
-            w_tv = torch.pow((gen_images[:, :, :, 1:] - gen_images[:, :, :, :-1]), 2).sum()
-            tv_loss = config.tv_weight * (h_tv / count_h + w_tv / count_w) / config.train_batch_size
+            # tv losss
+            if config.tv_weight > 0:
+                (_, c_x, h_x, w_x) = gen_images.size()
+                # c_x = gen_images.size()[1]
+                # h_x = gen_images.size()[2]
+                # w_x = gen_images.size()[3]
+                count_h = c_x * (h_x - 1) * w_x
+                count_w = c_x * h_x * (w_x - 1)
+                h_tv = torch.pow((gen_images[:, :, 1:, :] - gen_images[:, :, :-1, :]), 2).sum()
+                w_tv = torch.pow((gen_images[:, :, :, 1:] - gen_images[:, :, :, :-1]), 2).sum()
+                tv_loss = config.tv_weight * (h_tv / count_h + w_tv / count_w) / config.train_batch_size
 
-        if config.st_weight > 0:
-            gen_gram = self.gram_matrix(gen_images)
-            unl_gram = self.gram_matrix(unl_images)
+            if config.st_weight > 0:
+                gen_gram = self.gram_matrix(gen_images)
+                unl_gram = self.gram_matrix(unl_images)
+                st_loss += config.st_weight * nn.MSELoss()(gen_gram, unl_gram)
 
-            st_loss += config.st_weight * F.MSELoss(gen_gram, unl_gram)
+            # Generator loss
+            g_loss = fm_loss + tv_loss + st_loss + \
+                     vi_loss + gf_loss + gl_loss + \
+                     im_loss + cim_loss + il_loss   # + gg_loss
 
-        # Generator loss
-        g_loss = fm_loss + vi_loss + gf_loss + im_loss + cim_loss + il_loss + tv_loss + st_loss   # + gg_loss
+            self.gen_optimizer.zero_grad()
+            if config.gen_mode == "z2i": self.enc_optimizer.zero_grad()
+            g_loss.backward()
+            self.gen_optimizer.step()
+            if config.gen_mode == "z2i": self.enc_optimizer.step()
 
-        self.gen_optimizer.zero_grad()
-        if config.gen_mode == "z2i": self.enc_optimizer.zero_grad()
-        g_loss.backward()
-        self.gen_optimizer.step()
-        if config.gen_mode == "z2i": self.enc_optimizer.step()
-
-        monitor_dict = OrderedDict([
-            ('unl acc', unl_acc.data[0]),
-            ('gen acc', gen_acc.data[0]),
-            ('max unl acc', max_unl_acc.data[0]),
-            ('max gen acc', max_gen_acc.data[0]),
-            ('lab loss', lab_loss.data[0]),
-            ('unl loss', unl_loss.data[0])
-        ])
+        monitor_dict = OrderedDict()
+        monitor_dict['unl acc'] = unl_acc.data[0]
+        if gen_images is not None: monitor_dict['gen acc'] = gen_acc.data[0]
+        monitor_dict['max unl acc'] = max_unl_acc.data[0]
+        if gen_images is not None: monitor_dict['max gen acc'] = max_gen_acc.data[0]
+        monitor_dict['lab loss'] = lab_loss.data[0]
+        monitor_dict['unl loss'] = unl_loss.data[0]
         if config.da_weight > 0: monitor_dict['arc loss'] = arc_loss.data[0]
-        if config.dis_double: monitor_dict['la2 loss'] = lab_loss2.data[0]
+        if config.dgl_weight > 0: monitor_dict['dgl loss'] = dgl_loss.data[0]
         if config.con_coef > 0: monitor_dict['con loss'] = cons_loss.data[0]
         if config.nei_coef > 0: monitor_dict['nei loss'] = nei_loss.data[0]
-        if config.dis_double and config.dt_weight > 0: monitor_dict['tri loss'] = tri_loss.data[0]
-        if config.dis_double and config.ut_weight > 0: monitor_dict['ult loss'] = ult_loss.data[0]
-        monitor_dict['fm loss'] = fm_loss.data[0]
-        if config.gen_mode == "z2i": monitor_dict['vi loss'] = vi_loss.data[0]
-        if config.gen_mode == "z2i" and config.gf_weight > 0: monitor_dict['gf loss'] = gf_loss.data[0]
-        if config.gen_mode == "i2i" and config.im_weight > 0: monitor_dict['im loss'] = im_loss.data[0]
-        if config.gen_mode == "i2i" and config.cim_weight > 0: monitor_dict['cim loss'] = cim_loss.data[0]
-        if config.gen_mode == "i2i" and config.il_weight > 0: monitor_dict['il loss'] = il_loss.data[0]
-        if config.tv_weight > 0: monitor_dict['tv loss'] = tv_loss.data[0]
-        if config.st_weight > 0: monitor_dict['st loss'] = st_loss.data[0]
+        if config.dis_double:
+            monitor_dict['la2 loss'] = lab_loss2.data[0]
+            if config.dt_weight > 0: monitor_dict['tri loss'] = tri_loss.data[0]
+            if config.ut_weight > 0: monitor_dict['ult loss'] = ult_loss.data[0]
+        if hasattr(self, 'gen'):
+            monitor_dict['fm loss'] = fm_loss.data[0]
+            if config.tv_weight > 0: monitor_dict['tv loss'] = tv_loss.data[0]
+            if config.st_weight > 0: monitor_dict['st loss'] = st_loss.data[0]
+        if config.gen_mode == "z2i":
+            monitor_dict['vi loss'] = vi_loss.data[0]
+            if config.gf_weight > 0: monitor_dict['gf loss'] = gf_loss.data[0]
+            if config.gl_weight > 0: monitor_dict['gl loss'] = gl_loss.data[0]
+        if config.gen_mode == "i2i":
+            if config.im_weight > 0: monitor_dict['im loss'] = im_loss.data[0]
+            if config.cim_weight > 0: monitor_dict['cim loss'] = cim_loss.data[0]
+            if config.il_weight > 0: monitor_dict['il loss'] = il_loss.data[0]
 
         return monitor_dict
 
@@ -530,15 +582,15 @@ class Trainer(object):
             images.append(lab_images)
         images = torch.cat(images, 0)
 
-        if self.config.gen_mode == "z2i":
-            noise = Variable(torch.Tensor(images.size(0), self.config.noise_size).uniform_().cuda())
-        else:
-            noise = Variable(torch.Tensor(self.config.train_batch_size, images.size(1), images.size(2), images.size(3)).uniform_().cuda())
-            self.gen._initialize_weights()
-        self.gen.apply(func_gen(True))
-        gen_images = self.gen(noise)
-        self.gen.apply(func_gen(False))
-
+        if hasattr(self, 'gen'):
+            if self.config.gen_mode == "z2i":
+                noise = Variable(torch.Tensor(images.size(0), self.config.noise_size).uniform_().cuda())
+            else:
+                noise = Variable(torch.Tensor(images.size()).uniform_().cuda())
+                self.gen._initialize_weights()
+            self.gen.apply(func_gen(True))
+            gen_images = self.gen(noise)
+            self.gen.apply(func_gen(False))
 
         if hasattr(self, 'enc'):
             self.enc.apply(func_gen(True))
@@ -606,7 +658,8 @@ class Trainer(object):
         # save new
         self.save_model(self.dis, 'D', epo_label)
         self.save_model(self.ema_dis, 'M', epo_label)
-        self.save_model(self.gen, 'G', epo_label)
+        if hasattr(self, 'gen'):
+            self.save_model(self.gen, 'G', epo_label)
         if self.config.gen_mode == "z2i":
             self.save_model(self.enc, 'E', epo_label)
         if self.config.dis_double:
@@ -616,7 +669,8 @@ class Trainer(object):
             epo_label -= self.config.eval_period
             self.del_model('D', epo_label)
             self.del_model('M', epo_label)
-            self.del_model('G', epo_label)
+            if hasattr(self, 'gen'):
+                self.del_model('G', epo_label)
             if self.config.gen_mode == "z2i":
                 self.del_model('E', epo_label)
             if self.config.dis_double:
@@ -626,7 +680,8 @@ class Trainer(object):
         # load old
         self.load_model(self.dis, 'D', epo_label)
         self.load_model(self.ema_dis, 'M', epo_label)
-        self.load_model(self.gen, 'G', epo_label)
+        if hasattr(self, 'gen'):
+            self.load_model(self.gen, 'G', epo_label)
         if self.config.gen_mode == "z2i":
             self.load_model(self.enc, 'E', epo_label)
         if self.config.dis_double:
@@ -712,7 +767,8 @@ class Trainer(object):
                 epoch_ratio = float(epoch) / float(config.max_epochs)
                 # use another outer max to prevent any float computation precision problem
                 self.dis_optimizer.param_groups[0]['lr'] = max(min_lr, config.dis_lr * min(3. * (1. - epoch_ratio), 1.))
-                self.gen_optimizer.param_groups[0]['lr'] = max(min_lr, config.gen_lr * min(3. * (1. - epoch_ratio), 1.))
+                if hasattr(self, 'gen'):
+                    self.gen_optimizer.param_groups[0]['lr'] = max(min_lr, config.gen_lr * min(3. * (1. - epoch_ratio), 1.))
                 if config.gen_mode == "z2i":
                     self.enc_optimizer.param_groups[0]['lr'] = max(min_lr, config.enc_lr * min(3. * (1. - epoch_ratio), 1.))
 
@@ -752,8 +808,8 @@ class Trainer(object):
                         tri_result2 = tri_result2 / (1.0 * len(self.dev_loader))
                     else:
                         tri_result2 = 0.
-
-                unl_acc, gen_acc, max_unl_acc, max_gen_acc = self.eval_true_fake(self.dev_loader, 10)
+                if hasattr(self, 'gen'):
+                    unl_acc, gen_acc, max_unl_acc, max_gen_acc = self.eval_true_fake(self.dev_loader, 10)
 
                 train_incorrect /= 1.0 * len(self.labeled_loader)
                 dev_incorrect /= 1.0 * len(self.dev_loader)
@@ -772,8 +828,9 @@ class Trainer(object):
                 for k, v in monitor.items():
                     disp_str += ' | {}: {:.4f}'.format(k, v / config.eval_period)
 
-                disp_str += ' | [Eval] unl acc: {:.4f}, gen acc: {:.4f}, max unl acc: {:.4f}, max gen acc: {:.4f}'.format(
-                    unl_acc, gen_acc, max_unl_acc, max_gen_acc)
+                if hasattr(self, 'gen'):
+                    disp_str += ' | [Eval] unl acc: {:.4f}, gen acc: {:.4f}, max unl acc: {:.4f}, max gen acc: {:.4f}'.format(
+                        unl_acc, gen_acc, max_unl_acc, max_gen_acc)
                 disp_str += ' | lr: {:.5f}'.format(self.dis_optimizer.param_groups[0]['lr'])
                 disp_str += '\n'
 
@@ -808,6 +865,8 @@ if __name__ == '__main__':
                         help="evaluate period, -1: per-epoch")
     parser.add_argument('-vis_period', default=cc.vis_period, type=int,
                         help="visualize period, -1: per-epoch")
+    parser.add_argument('-ld', '--size_labeled_data', default=cc.size_labeled_data, type=int,
+                        help="labeled data num")
     parser.add_argument('-train_batch_size', default=cc.train_batch_size, type=int,
                         help="labeled batch size")
     parser.add_argument('-train_batch_size_2', default=cc.train_batch_size_2, type=int,
@@ -842,18 +901,22 @@ if __name__ == '__main__':
                         help="dis unlabeled loss content")
     parser.add_argument('-dg_weight', default=cc.dg_weight, type=float,
                         help="dis gen loss content")
+    parser.add_argument('-dgl_weight', default=cc.dgl_weight, type=float,
+                        help="dis gen lab loss content")
     parser.add_argument('-da_weight', default=cc.da_weight, type=float,
                         help="dis arcface loss content")
     parser.add_argument('-dt_weight', default=cc.dt_weight, type=float,
                         help="dis triple loss content")
     parser.add_argument('-ut_weight', default=cc.ut_weight, type=float,
                         help="dis triple gan loss content")
-    parser.add_argument('-gf_weight', default=cc.gf_weight, type=float,
-                        help="z2i, gl loss content")
     parser.add_argument('-tv_weight', default=cc.tv_weight, type=float,
                         help="tv loss weight")
     parser.add_argument('-st_weight', default=cc.st_weight, type=float,
                         help="style loss weight")
+    parser.add_argument('-gf_weight', default=cc.gf_weight, type=float,
+                        help="z2i, gl loss content")
+    parser.add_argument('-gl_weight', default=cc.gl_weight, type=float,
+                        help="z2i, gen z lab loss content")
     parser.add_argument('-im_weight', default=cc.im_weight, type=float,
                         help="i2i, image matching loss weight")
     parser.add_argument('-cim_weight', default=cc.cim_weight, type=float,
@@ -863,20 +926,18 @@ if __name__ == '__main__':
     parser.add_argument('-gop', default=cc.gop, type=str,
                         help="gen optim: Adam, SGD")
     parser.add_argument('-gen_mode', default=cc.gen_mode, type=str,
-                        help="gen model mode: z2i, i2i")
+                        help="gen model mode: z2i, i2i, non")
     parser.add_argument('-dis_mode', default=cc.dis_mode, type=str,
                         help="dis model mode: d, m, dm; 'd,dm'")
     parser.add_argument('-cd_mode_iter', default=cc.cd_mode_iter, type=int,
                         help="change dis mode")
-    # parser.add_argument('-gg_weight', default=cc.gg_weight, type=float,
-    #                     help="gg loss content")
-    # parser.add_argument('-gg_margin', default=cc.gg_margin, type=float,
-    #                     help="gg margin content")
     parser.add_argument('-d', dest='double_input_size', action='store_true')
     parser.add_argument('-f', dest='flip', action='store_true')
     parser.add_argument('-dd', dest='dis_double', action='store_true')
     parser.add_argument('-dt', dest='dis_triple', action='store_true')
     parser.set_defaults(resume=False)
+    parser.set_defaults(dis_double=False)
+    parser.set_defaults(dis_triple=False)
     parser.set_defaults(double_input_size=cc.double_input_size)
     parser.set_defaults(flip=cc.flip)
     args = parser.parse_args()
