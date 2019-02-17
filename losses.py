@@ -11,6 +11,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.autograd import Variable
+import numpy as np
 
 
 def softmax_mse_loss(input_logits, target_logits):
@@ -69,3 +70,19 @@ class FocalLoss(nn.Module):
         p = torch.exp(-logp)
         loss = (1 - p) ** self.gamma * logp
         return loss.mean()
+
+
+def uncertainty_loss(criterion, outputs, sig, targets, sna=50):
+    # heteroscedastic_uncertainty_loss
+    # loss = Variable(torch.from_numpy(np.array([0.], dtype=np.float)).float().cuda())
+    loss = 0
+    output_avg = Variable(torch.zeros(outputs.data.size()).float().cuda())
+    for a in xrange(sna):  # samples mean
+        # outputs2 = outputs + sig * Variable(torch.randn(outputs.data.shape).cuda())   # shape for pc only, server use size
+        outputs2 = outputs + sig * Variable(torch.randn(outputs.data.size()).cuda())
+        output_avg += outputs2
+        loss += criterion(outputs2, targets)
+
+    loss /= sna
+    output_avg /= sna
+    return loss, output_avg

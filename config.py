@@ -4,7 +4,7 @@ import numpy as np
 
 class mnist_config:
     dataset = 'mnist'
-    image_size = 28 * 28
+    image_side = 28 # 28 * 28
     num_label = 10
 
     gen_emb_size = 20
@@ -43,7 +43,7 @@ class mnist_config:
 
 class svhn_config:
     dataset = 'svhn'
-    image_size = 3 * 32 * 32
+    image_side = 32     # 3 * 32 * 32
     num_label = 10
 
     gen_emb_size = 20
@@ -72,9 +72,10 @@ class svhn_config:
     p_loss_weight = 1e-4
     p_loss_prob = 0.1
 
+
 class cifar_config:
     dataset = 'cifar'
-    image_size = 3 * 32 * 32
+    image_side = 32     # 3 * 32 * 32
     num_label = 10
 
     gen_emb_size = 20
@@ -90,6 +91,8 @@ class cifar_config:
     data_root = 'data'
 
     size_labeled_data = 4000
+    size_unlabeled_data = 50000 # coil20 use
+    size_test_data = 10000
 
     train_batch_size = 100
     train_batch_size_2 = 100
@@ -99,36 +102,74 @@ class cifar_config:
     vi_weight = 1e-2
 
 
-class cifarh_config:
-    dataset = 'cifarh'
-    image_size = 3 * 32 * 32
+class cifarmu_config:
+    dataset = 'cifar'
+    image_side = 32     # 3 * 32 * 32
     num_label = 10
+    allowed_label = ""
+    train_step = 1
+    dis_channels = "2048,192"
 
     gen_emb_size = 20
-    noise_size = 100
 
     dis_lr = 6e-4
     enc_lr = 3e-4
     gen_lr = 3e-4
 
-    eval_period = 500
-    vis_period = 500
+    eval_period = -1
+    vis_period = -1
 
     data_root = 'data'
 
-    size_labeled_data = 10000
+    size_labeled_data = 4000
+    size_unlabeled_data = 50000
 
     train_batch_size = 100
     train_batch_size_2 = 100
     dev_batch_size = 200
 
-    max_epochs = 1200
-    vi_weight = 1e-2
+    max_epochs = 1000    # 1200
+    last_epochs = 0
+    dg_start = 0
+    dl_weight = 1.    # dis lab loss
+    du_weight = 1.    # dis unlabeled loss
+    dg_weight = 1.    # dis gen loss
+    dgl_weight = 0.    # dis gen lab loss
+    da_weight = 0.    # dis arcface loss
+    dt_weight = 0.    # dis triple loss; no d in dis_mode no tri
+    ut_weight = 0.    # dis triple gan loss; no d in dis_mode no tri
+    tv_weight = 0.    # tv
+    st_weight = 0.    # style loss
+    gl_weight = 0.    # gen label loss
+    gen_mode = '50'    # z2i; i2i
+    dis_mode = 'd'    # dm; d; m
+
+    ema_decay = 0.999
+    consistency_type = 'mse'    # mse; kl
+    con_coef = 0.0
+    nei_coef = 0.0
+    nei_margin = 1.0
+    nei_top = 1
+    c_rampup = 5    # consistency_rampup
+    ini_lr = 0.    # lr rampup ini
+    lr_rampup = 0    # lr_rampup fin epoch
+    lr_rampdn = None    # lr_rampdn
+    t_forget_coef = 2.
+    t_start = 70.
+    drop = False
+    flip = False
+    dis_double = False
+    dis_triple = False
+
+    gop = 'Adam'
+    momentum = 0.9
+    weight_decay = 2e-4
+    nesterov = True  # use nesterov momentum
 
 
 class cifarmg_config:
     dataset = 'cifar'
-    image_size = 3 * 32 * 32
+    image_side = 32     # 3 * 32 * 32
     num_label = 10
 
     gen_emb_size = 20
@@ -194,9 +235,10 @@ class cifarmg_config:
     weight_decay = 2e-4
     nesterov = True  # use nesterov momentum
 
+
 class cifarmt_config:
     dataset = 'cifar'
-    image_size = 3 * 32 * 32
+    image_side = 32     # 3 * 32 * 32
     num_label = 10
 
     gen_emb_size = 20

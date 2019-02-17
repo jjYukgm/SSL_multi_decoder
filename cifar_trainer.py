@@ -19,6 +19,8 @@ from collections import OrderedDict
 
 import numpy as np
 from utils import *
+# for debug image_side=96
+# import pdb
 
 class Trainer(object):
 
@@ -35,11 +37,12 @@ class Trainer(object):
         sys.stdout.write(disp_str)
         sys.stdout.flush()
 
-        self.labeled_loader, self.unlabeled_loader, self.unlabeled_loader2, self.dev_loader, self.special_set = data.get_cifar_loaders(config)
+        self.labeled_loader, self.unlabeled_loader, self.dev_loader, self.special_set = \
+            data.get_data_loaders(config)
 
         self.dis = model.Discriminative(config).cuda()
-        self.gen = model.Generator(image_size=config.image_size, noise_size=config.noise_size).cuda()
-        self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
+        self.gen = model.Generator(image_side=config.image_side, noise_size=config.noise_size).cuda()
+        self.enc = model.Encoder(config.image_side, noise_size=config.noise_size, output_params=True).cuda()
 
         self.dis_optimizer = optim.Adam(self.dis.parameters(), lr=config.dis_lr, betas=(0.5, 0.999))
         self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
@@ -210,20 +213,39 @@ class Trainer(object):
                     setattr(m, 'init_mode', flag)
             return func
 
+
+        self.gen.eval()
+        self.dis.eval()
+        self.enc.eval()
+
         images = []
-        for i in range(500 / self.config.train_batch_size):
+        if self.config.image_side == 128:
+            num_img = 30
+        elif self.config.image_side == 96:
+            num_img = 55
+        elif self.config.image_side == 64:
+            num_img = 125
+        elif self.config.image_side == 32:
+            num_img = 500
+        else:
+            assert False, "The image side out of case: {}".format(self.config.image_side)
+
+        for i in range((num_img +self.config.train_batch_size -1) / self.config.train_batch_size):
             lab_images, _ = self.labeled_loader.next()
             images.append(lab_images)
         images = torch.cat(images, 0)
+        images = images[:num_img]
 
         self.gen.apply(func_gen(True))
         noise = Variable(torch.Tensor(images.size(0), self.config.noise_size).uniform_().cuda())
         gen_images = self.gen(noise)
         self.gen.apply(func_gen(False))
 
+        # pdb.set_trace()
         self.enc.apply(func_gen(True))
         self.enc(gen_images)
         self.enc.apply(func_gen(False))
+        del gen_images
 
         self.dis.apply(func_gen(True))
         logits = self.dis(Variable(images.cuda()))
@@ -282,6 +304,10 @@ class Trainer(object):
         monitor = OrderedDict()
         
         batch_per_epoch = int((len(self.unlabeled_loader) + config.train_batch_size - 1) / config.train_batch_size)
+        if config.eval_period == -1:
+            config.eval_period = batch_per_epoch
+        if config.vis_period == -1:
+            config.vis_period = batch_per_epoch
         min_lr = config.min_lr if hasattr(config, 'min_lr') else 0.0
         start_time = time.time()
         while True:
@@ -348,6 +374,24 @@ if __name__ == '__main__':
                         help="max epoches")
     parser.add_argument('-ld', '--size_labeled_data', default=cc.size_labeled_data, type=int,
                         help="labeled data num")
+    parser.add_argument('-ud', '--size_unlabeled_data', default=cc.size_unlabeled_data, type=int,
+                        help="unlabeled data num")
+    parser.add_argument('-train_batch_size', default=cc.train_batch_size, type=int,
+                        help="labeled batch size")
+    parser.add_argument('-train_batch_size_2', default=cc.train_batch_size_2, type=int,
+                        help="unlabeled batch size")
+    parser.add_argument('-num_label', default=cc.num_label, type=int,
+                        help="label num")
+    parser.add_argument('-allowed_label', default="", type=str,
+                        help="allowed label in dataset")
+    parser.add_argument('-dataset', default="cifar", type=str,
+                        help="cifar, stl10")
+    parser.add_argument('-image_side', default="32", type=int,
+                        help="cifar: 32, stl10: 96")
+    parser.add_argument('-eval_period', default=cc.eval_period, type=int,
+                        help="evaluate period, -1: per-epoch")
+    parser.add_argument('-vis_period', default=cc.vis_period, type=int,
+                        help="visualize period, -1: per-epoch")
 
     args = parser.parse_args()
     trainer = Trainer(cc, args)

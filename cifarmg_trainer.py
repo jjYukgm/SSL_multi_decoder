@@ -41,7 +41,7 @@ class Trainer(object):
         sys.stdout.write(disp_str)
         sys.stdout.flush()
 
-        self.labeled_loader, self.unlabeled_loader, self.unlabeled_loader2, self.dev_loader, self.special_set = data.get_cifar_loaders(
+        self.labeled_loader, self.unlabeled_loader, self.dev_loader, self.special_set = data.get_cifar_loaders(
             config)
 
         self.dis = model.Discriminative(config).cuda()
@@ -49,7 +49,7 @@ class Trainer(object):
         # for param in self.ema_dis.parameters():
         #     param.detach_()
         if config.gen_mode != "non":
-            self.gen = model.generator(image_size=config.image_size, noise_size=config.noise_size, large=config.double_input_size, gen_mode=config.gen_mode).cuda()
+            self.gen = model.generator(image_side=config.image_side, noise_size=config.noise_size, large=config.double_input_size, gen_mode=config.gen_mode).cuda()
 
         dis_para = [{'params': self.dis.parameters()},]
         if 'm' in config.dis_mode:  # svhn: 168; cifar:192
@@ -73,7 +73,7 @@ class Trainer(object):
             else:
                 self.gen_optimizer = optim.Adam(self.gen.parameters(), lr=config.gen_lr, betas=(0.0, 0.999))
         if config.gen_mode == "z2i":
-            self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
+            self.enc = model.Encoder(config.image_side, noise_size=config.noise_size, output_params=True).cuda()
             self.enc_optimizer = optim.Adam(self.enc.parameters(), lr=config.enc_lr, betas=(0.0, 0.999))
 
         self.d_criterion = nn.CrossEntropyLoss()
@@ -95,8 +95,11 @@ class Trainer(object):
             config.dis_mode = config.dis_mode.split(",")[0]
 
         log_path = os.path.join(self.config.save_dir, '{}.FM+VI.{}.txt'.format(self.config.dataset, self.config.suffix))
-        self.logger = open(log_path, 'wb')
-        self.logger.write(disp_str)
+        if config.resume:
+            self.logger = open(log_path, 'ab')
+        else:
+            self.logger = open(log_path, 'wb')
+            self.logger.write(disp_str)
 
         # for arcface
         self.s = 30.0
@@ -921,7 +924,7 @@ if __name__ == '__main__':
                         help="i2i, image matching loss weight")
     parser.add_argument('-cim_weight', default=cc.cim_weight, type=float,
                         help="i2i, cosine image matching loss weight")
-    parser.add_argument('-il_weight', default=cc.cim_weight, type=float,
+    parser.add_argument('-il_weight', default=cc.il_weight, type=float,
                         help="i2i, image lab loss weight")
     parser.add_argument('-gop', default=cc.gop, type=str,
                         help="gen optim: Adam, SGD")

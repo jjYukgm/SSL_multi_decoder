@@ -1,4 +1,5 @@
 import torch
+import torchvision
 from torch.autograd import Variable
 import torch.nn as nn
 import torch.nn.functional as F
@@ -9,6 +10,19 @@ import torch.nn.init as nn_init
 from unet_parts import *
 from math import sqrt
 # import pdb
+
+def load_my_state_dict(net, state_dict):
+    own_state = net.state_dict()
+    for name, param in state_dict.items():
+        if name not in own_state:
+            continue
+        if isinstance(param, Parameter):
+            # backwards compatibility for serialized parameters
+            param = param.data
+        elif isinstance(param, Tensor):
+            # backwards compatibility for serialized parameters
+            param = param
+        own_state[name].copy_(param)
 
 class GaussianNoise(nn.Module):
     def __init__(self, sigma):
@@ -225,6 +239,10 @@ class Discriminative(thisModule):
             n_filter_1, n_filter_2 = 64, 128
         elif config.dataset == 'cifar':
             n_filter_1, n_filter_2 = 96, 192
+        elif config.dataset == 'stl10':
+            n_filter_1, n_filter_2 = 96, 192
+        elif config.dataset == 'coil20':
+            n_filter_1, n_filter_2 = 96, 192
         else:
             raise ValueError('dataset not found: {}'.format(config.dataset))
 
@@ -299,28 +317,20 @@ class Discriminative_out(thisModule):
     def forward(self, X):
             return self.out_net2(X)
 
-def generator(image_size, noise_size=100, large=False, gen_mode='z2i'):
+def generator(image_side, noise_size=100, large=False, gen_mode='z2i'):
     if gen_mode == 'i2i':
         return UNet(3, 3, large=large, upbilinear=True)
     elif gen_mode == 'z2i':
-        return Generator(image_size, noise_size=noise_size, large=large)
+        return Generator(image_side, noise_size=noise_size, large=large)
 
 class Generator(thisModule):
-    def __init__(self, image_size, noise_size=100, large=False):
+    def __init__(self, image_side, noise_size=100, large=False):
         super(Generator, self).__init__()
 
         self.noise_size = noise_size
-        self.image_size = image_size
+        self.image_side = image_side
 
-        if not large:   # side: 32
-            self.core_net = nn.Sequential(
-                nn.Linear(self.noise_size, 4 * 4 * 512, bias=False), nn.BatchNorm1d(4 * 4 * 512), nn.ReLU(), 
-                Expression(lambda tensor: tensor.view(tensor.size(0), 512, 4, 4)),
-                nn.ConvTranspose2d(512, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
-                nn.ConvTranspose2d(256, 128, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
-                WN_ConvTranspose2d(128,   3, 5, 2, 2, 1, train_scale=True, init_stdv=0.1), nn.Tanh(),
-            )
-        else:   # side: 64
+        if self.image_side == 64:
             self.core_net = nn.Sequential(
                 nn.Linear(self.noise_size, 2 * 2 * 1024, bias=False), nn.BatchNorm1d(2 * 2 * 1024), nn.ReLU(), 
                 Expression(lambda tensor: tensor.view(tensor.size(0), 1024, 2, 2)),
@@ -328,8 +338,39 @@ class Generator(thisModule):
                 nn.ConvTranspose2d(512, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
                 nn.ConvTranspose2d(256, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
                 nn.ConvTranspose2d(256, 128, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
-                WN_ConvTranspose2d(128,   3, 5, 1, 2, 0, train_scale=True, init_stdv=0.1), nn.Tanh(),
+                WN_ConvTranspose2d(128,   3, 5, 2, 2, 1, train_scale=True, init_stdv=0.1), nn.Tanh(),
             )
+        elif self.image_side == 96:
+            self.core_net = nn.Sequential(
+                nn.Linear(self.noise_size, 3 * 3 * 1024, bias=False), nn.BatchNorm1d(3 * 3 * 1024), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), 1024, 3, 3)),
+                nn.ConvTranspose2d(1024, 512, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                nn.ConvTranspose2d(512, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 128, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                WN_ConvTranspose2d(128,   3, 5, 2, 2, 1, train_scale=True, init_stdv=0.1), nn.Tanh(),
+            )
+        elif self.image_side == 128:
+            self.core_net = nn.Sequential(
+                nn.Linear(self.noise_size, 2 * 2 * 1024, bias=False), nn.BatchNorm1d(2 * 2 * 1024), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), 1024, 2, 2)),
+                nn.ConvTranspose2d(1024, 512, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                nn.ConvTranspose2d(512, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 128, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                WN_ConvTranspose2d(128,   3, 5, 2, 2, 1, train_scale=True, init_stdv=0.1), nn.Tanh(),
+            )
+        elif self.image_side == 32:   # side: 32
+            self.core_net = nn.Sequential(
+                nn.Linear(self.noise_size, 4 * 4 * 512, bias=False), nn.BatchNorm1d(4 * 4 * 512), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), 512, 4, 4)),
+                nn.ConvTranspose2d(512, 256, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.ConvTranspose2d(256, 128, 5, 2, 2, 1, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                WN_ConvTranspose2d(128,   3, 5, 2, 2, 1, train_scale=True, init_stdv=0.1), nn.Tanh(),
+            )
+        else:
+            assert False, "The image side out of case: {}".format(self.image_side)
 
     def forward(self, noise):        
         output = self.core_net(noise)
@@ -337,24 +378,71 @@ class Generator(thisModule):
         return output
 
 class Encoder(thisModule):
-    def __init__(self, image_size, noise_size=100, output_params=False):
+    def __init__(self, image_side, noise_size=100, output_params=False):
         super(Encoder, self).__init__()
 
         self.noise_size = noise_size
-        self.image_size = image_size
+        self.image_side = image_side
 
-        self.core_net = nn.Sequential(
-            nn.Conv2d(  3, 128, 5, 2, 2, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
-            nn.Conv2d(128, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
-            nn.Conv2d(256, 512, 5, 2, 2, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
-            Expression(lambda tensor: tensor.view(tensor.size(0), -1)), # 512 * 4 * 4)),
-        )
-        
-        if output_params:
-            self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(4 * 4 * 512, self.noise_size*2, train_scale=True, init_stdv=0.1))
-            self.core_net.add_module(str(len(self.core_net._modules)), Expression(lambda x: torch.chunk(x, 2, 1)))
+        if self.image_side == 32:
+            self.core_net = nn.Sequential(
+                nn.Conv2d(  3, 128, 5, 2, 2, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                nn.Conv2d(128, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 512, 5, 2, 2, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), -1)), # 512 * 4 * 4)),
+            )
+            if output_params:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(4 * 4 * 512, self.noise_size*2, train_scale=True, init_stdv=0.1))
+                self.core_net.add_module(str(len(self.core_net._modules)), Expression(lambda x: torch.chunk(x, 2, 1)))
+            else:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(4 * 4 * 512, self.noise_size, train_scale=True, init_stdv=0.1))
+
+        elif self.image_side == 96:
+            self.core_net = nn.Sequential(
+                nn.Conv2d(  3, 128, 5, 2, 2, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                nn.Conv2d(128, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 512, 5, 2, 2, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), -1)), # 512 * 3 * 3)),
+            )
+            if output_params:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(3 * 3 * 512, self.noise_size*2, train_scale=True, init_stdv=0.1))
+                self.core_net.add_module(str(len(self.core_net._modules)), Expression(lambda x: torch.chunk(x, 2, 1)))
+            else:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(3 * 3 * 512, self.noise_size, train_scale=True, init_stdv=0.1))
+
+        elif self.image_side == 64:
+            self.core_net = nn.Sequential(
+                nn.Conv2d(  3, 128, 5, 2, 2, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                nn.Conv2d(128, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 512, 5, 2, 2, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), -1)), # 512 * 2 * 2)),
+            )
+            if output_params:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(2 * 2 * 512, self.noise_size*2, train_scale=True, init_stdv=0.1))
+                self.core_net.add_module(str(len(self.core_net._modules)), Expression(lambda x: torch.chunk(x, 2, 1)))
+            else:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(2 * 2 * 512, self.noise_size, train_scale=True, init_stdv=0.1))
+        elif self.image_side == 128:
+            self.core_net = nn.Sequential(
+                nn.Conv2d(  3, 128, 5, 2, 2, bias=False), nn.BatchNorm2d(128), nn.ReLU(),
+                nn.Conv2d(128, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 256, 5, 2, 2, bias=False), nn.BatchNorm2d(256), nn.ReLU(),
+                nn.Conv2d(256, 512, 5, 2, 2, bias=False), nn.BatchNorm2d(512), nn.ReLU(),
+                Expression(lambda tensor: tensor.view(tensor.size(0), -1)),
+            )
+            if output_params:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(2 * 2 * 512, self.noise_size*2, train_scale=True, init_stdv=0.1))
+                self.core_net.add_module(str(len(self.core_net._modules)), Expression(lambda x: torch.chunk(x, 2, 1)))
+            else:
+                self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(2 * 2 * 512, self.noise_size, train_scale=True, init_stdv=0.1))
         else:
-            self.core_net.add_module(str(len(self.core_net._modules)), WN_Linear(4 * 4 * 512, self.noise_size, train_scale=True, init_stdv=0.1))
+            assert False, "The image side out of case: {}".format(self.image_side)
 
     def forward(self, input):
         
@@ -376,26 +464,61 @@ class Encoder(thisModule):
                 param = param
             own_state[name].copy_(param)
 
-class Encoder_skip(thisModule):
-    def __init__(self, n_channels, n_classes, large=False, upbilinear=True, skip_layer=5):
-        # n_channels: input channels; n_classes: output channels
-        super(Encoder_skip, self).__init__()    # cifar: 64 => 16
-        if large:
-            cnum = 32   # min channel num
+
+# ref: https://github.com/kevinlu1211/pytorch-unet-resnet-50-encoder/blob/master/u_net_resnet_50_encoder.py
+class UNetWithResnet50Encoder(thisModule):
+    DEPTH = 6
+
+    def __init__(self, n_classes=3, res='50'):
+        super(UNetWithResnet50Encoder, self).__init__()
+        res = str(res)
+        if res == '50':
+            resnet = torchvision.models.resnet.resnet50(pretrained=True)
+            chas = [2048, 1024, 512, 256, 128, 64]
+        elif res == '34':
+            resnet = torchvision.models.resnet.resnet34(pretrained=True)
+            chas = [512, 256, 128, 64, 64, 64]
+        elif res == '18':
+            resnet = torchvision.models.resnet.resnet18(pretrained=True)
+            chas = [512, 256, 128, 64, 64, 64]
         else:
-            cnum = 64   # min channel num
+            assert False, "The res = {}".format(res)
+        down_blocks = []
+        up_blocks = []
+        self.input_block = nn.Sequential(*list(resnet.children())[:3])
+        self.input_pool = list(resnet.children())[3]
+        for bottleneck in list(resnet.children()):
+            if isinstance(bottleneck, nn.Sequential):
+                down_blocks.append(bottleneck)
+        self.down_blocks = nn.ModuleList(down_blocks)
+        self.bridge = Bridge(chas[0], chas[0])
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[0], chas[1]))
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[1], chas[2]))
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[2], chas[3]))
+        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[4] + chas[5], out_channels=chas[4],
+                                                    up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
+        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[5] + 3, out_channels=chas[5],
+                                                    up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
+        # self.bridge = Bridge(2048, 2048)
+        # up_blocks.append(UpBlockForUNetWithResNet50(2048, 1024))
+        # up_blocks.append(UpBlockForUNetWithResNet50(1024, 512))
+        # up_blocks.append(UpBlockForUNetWithResNet50(512, 256))
+        # up_blocks.append(UpBlockForUNetWithResNet50(in_channels=128 + 64, out_channels=128,
+        #                                             up_conv_in_channels=256, up_conv_out_channels=128))
+        # up_blocks.append(UpBlockForUNetWithResNet50(in_channels=64 + 3, out_channels=64,
+        #                                             up_conv_in_channels=128, up_conv_out_channels=64))
 
-        self.downs = nn.Sequential()
-        self.downs.add_module(str(len(self.downs._modules)), inconv(n_channels, cnum))
-        in_  = [1, 2, 4, 8]
-        out_ = [2, 4, 8, 8]
-        for i in skip_layer:
-            self.downs.add_module(str(len(self.downs._modules)),
-                                  down(cnum*in_[i], cnum*out_[i]))
-        self._initialize_weights()
+        self.up_blocks = nn.ModuleList(up_blocks)
 
-    def _initialize_weights(self):
-        for m in self.modules():
+        self.out = nn.Conv2d(chas[5], n_classes, kernel_size=1, stride=1)
+        self._initialize_weights(self.up_blocks)
+        self._initialize_weights(self.out)
+
+
+    def _initialize_weights(self, modules=None):
+        if modules is None:
+            modules = self
+        for m in modules.modules():
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
                 m.weight.data.normal_(0, sqrt(2. / n))
@@ -405,69 +528,148 @@ class Encoder_skip(thisModule):
                     m.weight.data.fill_(1)
                     m.bias.data.zero_()
 
-    def forward(self, x, skips=False):
-        x = x * 0.5 + 0.5  # [-1, 1] -> [0, 1]
-        if skips:
-            x_tmp = []
-            for i in range(len(self.downs._modules)):
-                x = self.downs[i](x)
-                x_tmp.append(x)
-            return x_tmp
+    def forward(self, x, with_output_feature_map=False, encode=False, skip_encode=False):
+        pre_pools = dict()
+        pre_pools["layer_0"] = x
+        x = self.input_block(x)
+        pre_pools["layer_1"] = x
+        x = self.input_pool(x)
+
+        for i, block in enumerate(self.down_blocks, 2):
+            x = block(x)
+            if i == (UNetWithResnet50Encoder.DEPTH - 1):
+                continue
+            pre_pools["layer_{}".format(i)] = x
+
+        x = self.bridge(x)
+        if encode:
+            del pre_pools
+            x = x.mean(3, True).mean(2, True)
+            return x.view(x.size(0), -1)
+        elif skip_encode:
+            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+            pre_pools[key] = x
+            return pre_pools
+
+        for i, block in enumerate(self.up_blocks, 1):
+            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            x = block(x, pre_pools[key])
+        output_feature_map = x
+        x = self.out(x)
+        del pre_pools
+        if with_output_feature_map:
+            return x, output_feature_map
         else:
-            x = self.downs(x)
             return x
 
-class Decoder_skip(thisModule):
-    def __init__(self, n_channels, n_classes, large=False, upbilinear=True, skip_layer=5):
-        # n_channels: input channels; n_classes: output channels
-        super(Decoder_skip, self).__init__()    # cifar: 64 => 16
-        if large:
-            cnum = 32   # min channel num
+    def decode(self, pre_pools, with_output_feature_map=False):
+        key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+        x = pre_pools[key]
+        for i, block in enumerate(self.up_blocks, 1):
+            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            x = block(x, pre_pools[key])
+        output_feature_map = x
+        x = self.out(x)
+        del pre_pools
+        if with_output_feature_map:
+            return x, output_feature_map
         else:
-            cnum = 64   # min channel num
+            return x
 
-        self.ups = nn.Sequential()
-        in_ =  [16, 8, 4, 2]
-        out_ = [4, 2, 1, 1]
-        for i in skip_layer:
-            self.downs.add_module(str(len(self.ups._modules)),
-                                  up(cnum*in_[i], cnum*out_[i], bilinear=upbilinear))
-        self.ups.add_module(str(len(self.ups._modules)), WN_Conv2d(cnum, n_classes, 1))
+
+class Resnet50Decoder_skip(thisModule):
+    def __init__(self, n_classes=3, res='50'):
+        # n_classes: output channels
+        super(Resnet50Decoder_skip, self).__init__()
+        res = str(res)
+        if res == '50':
+            chas = [2048, 1024, 512, 256, 128, 64]
+        elif res == '34':
+            chas = [512, 256, 128, 64, 64, 64]
+        elif res == '18':
+            chas = [512, 256, 128, 64, 64, 64]
+        else:
+            assert False, "The res = {}".format(res)
+
+        up_blocks = []
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[0], chas[1]))
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[1], chas[2]))
+        up_blocks.append(UpBlockForUNetWithResNet50(chas[2], chas[3]))
+        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[4] + chas[5], out_channels=chas[4],
+                                                    up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
+        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[5] + 3, out_channels=chas[5],
+                                                    up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
+
+        self.up_blocks = nn.ModuleList(up_blocks)
+
+        self.out = nn.Conv2d(chas[5], n_classes, kernel_size=1, stride=1)
         self._initialize_weights()
 
     def _initialize_weights(self):
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
-                m.weight.data.normal_(0, sqrt(2. / n))
+            if isinstance(m, nn.Conv2d) or isinstance(m, nn.ConvTranspose2d):
                 if m.bias is not None:
                     m.bias.data.zero_()
-                elif isinstance(m, nn.BatchNorm2d):
-                    m.weight.data.fill_(1)
-                    m.bias.data.zero_()
+                if m.bias is not None:
+                    nn.init.xavier_uniform(m.weight)
+            elif isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
-    def forward(self, x_tmp):
-        # x = x * 0.5 + 0.5  # [-1, 1] -> [0, 1]
-        # add randoms
-        # x_tmp[-1]
-        max_len = len(self.ups._modules)
-        x = x_tmp[max_len-1]
-        for i in range(max_len-1):
-            x = self.ups[i](x, x_tmp[max_len-i-2])
-        x = self.ups[max_len-1](x)
+    def forward(self, pre_pools, with_output_feature_map=False):
+        key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+        x = pre_pools[key]
+        for i, block in enumerate(self.up_blocks, 1):
+            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            x = block(x, pre_pools[key])
+        output_feature_map = x
+        x = self.out(x)
+        del pre_pools
+        if with_output_feature_map:
+            return x, output_feature_map
+        else:
+            return x
 
-        # x1 = self.inc(x)
-        # x2 = self.down1(x1)
-        # x3 = self.down2(x2)
-        # x4 = self.down3(x3)
-        # x5 = self.down4(x4)
-        # x = self.up1(x5, x4)
-        # x = self.up2(x, x3)
-        # x = self.up3(x, x2)
-        # x = self.up4(x, x1)
-        # x = self.outc(x)
-        x = F.sigmoid(x) * 2. - 1. # [0, 1] -> [-1, 1]
-        return x
+    def decode(self, pre_pools, with_output_feature_map=False):
+        return self.forward(pre_pools, with_output_feature_map=with_output_feature_map)
+
+
+class Unet_Discriminator(thisModule):
+    def __init__(self, config, in_channels=(2048, 192), ema=False, ucnet=False):
+        super(Unet_Discriminator, self).__init__()
+
+        print '===> Init small-fc for {}'.format(config.dataset)
+
+        self.num_label = config.num_label
+        self.ucnet = ucnet
+
+        # assert len(in_channels) == 2, \
+        #     "in_channels needs 2 int in a tuple, now len={}".format(len(in_channels))
+        # (n_filter_1, n_filter_2) = in_channels
+        out_net = []
+        for i in range(len(in_channels)-1):
+            out_net.append(WN_Linear(in_channels[i], in_channels[i+1], train_scale=True, init_stdv=0.1))
+            out_net.append(nn.LeakyReLU(0.2))
+        out_net.append(WN_Linear(in_channels[-1], self.num_label, train_scale=True, init_stdv=0.1))
+
+        self.out_net = nn.Sequential(*out_net)
+        if self.ucnet:
+            self.uc_net = WN_Linear(in_channels[-1], self.num_label, train_scale=True, init_stdv=0.1)
+
+        if ema:
+            for param in self.parameters():
+                param.detach_()
+
+    def forward(self, X, uc=False):
+        if self.ucnet and uc:
+            for i in range(len(self.out_net)-1):
+                X = self.out_net[i](X)
+            uc = self.uc_net(X)
+            X = self.out_net[-1](X)
+            return X, uc
+        else:
+            return self.out_net(X)
+
 
 class UNet(thisModule):
     def __init__(self, n_channels, n_classes, large=False, upbilinear=True):
@@ -514,90 +716,3 @@ class UNet(thisModule):
         x = self.outc(x)
         x = F.sigmoid(x) * 2. - 1. # [0, 1] -> [-1, 1]
         return x
-
-'''
-class Discriminative2(thisModule):
-    def __init__(self, config, ema=False,
-                 n_filter_1=96, n_filter_2=192,
-                 block_config=(3), bn_size=4, drop_rate=0):
-        super(Discriminative2, self).__init__()
-
-        print '===> Init small-conv for {}'.format(config.dataset)
-
-        self.noise_size = config.noise_size
-        self.num_label  = config.num_label
-
-        if config.double_input_size:
-            self.side = 64
-        else:
-            self.side = 32
-        # if config.dataset == 'svhn':
-        #     n_filter_1, n_filter_2 = 64, 128
-        # elif config.dataset == 'cifar':
-        #     n_filter_1, n_filter_2 = 96, 192
-        # else:
-        #     raise ValueError('dataset not found: {}'.format(config.dataset))
-
-        drop_ = 0. if hasattr(config, "drop") and config.drop else 0.5
-        # Assume X is of size [batch x 3 x 32 x 32]
-        self.core_net = nn.Sequential(  # input side size not aware
-
-            nn.Sequential(GaussianNoise(0.05), nn.Dropout2d(0.15)) if config.dataset == 'svhn' \
-                else nn.Sequential(GaussianNoise(0.05), nn.Dropout2d(0.2)),
-
-            WN_Conv2d(         3, n_filter_1, 3, 1, 1), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_1, n_filter_1, 3, 1, 1), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_1, n_filter_1, 3, 2, 1), nn.LeakyReLU(0.2),
-
-            nn.Dropout2d(drop_) if config.dataset == 'svhn' else nn.Dropout(drop_),
-
-            WN_Conv2d(n_filter_1, n_filter_2, 3, 1, 1), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_2, n_filter_2, 3, 1, 1), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_2, n_filter_2, 3, 2, 1), nn.LeakyReLU(0.2),
-
-            nn.Dropout2d(drop_) if config.dataset == 'svhn' else nn.Dropout(drop_),
-
-            WN_Conv2d(n_filter_2, n_filter_2, 3, 1, 0), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_2, n_filter_2, 1, 1, 0), nn.LeakyReLU(0.2),
-            WN_Conv2d(n_filter_2, n_filter_2, 1, 1, 0), nn.LeakyReLU(0.2),
-
-            # Expression(lambda tensor: tensor.mean(3).mean(2).squeeze()),
-        )
-        self.dense_net = nn.Sequential()
-        num_features = n_filter_2
-        for i, num_layers in enumerate(block_config):
-            growth_rate = n_filter_2 // num_layers  # 32
-            block = _DenseBlock(num_layers=num_layers, num_input_features=num_features,
-                                bn_size=bn_size, growth_rate=growth_rate, drop_rate=drop_rate)
-            self.dense_net.add_module('denseblock%d' % (i + 1), block)
-            num_features = num_features + num_layers * growth_rate
-            if i != len(block_config) - 1:
-                trans = _Transition(num_input_features=num_features, num_output_features=num_features // 2)
-            self.dense_net.add_module('transition%d' % (i + 1), trans)
-            num_features = num_features // 2
-        self.out_net = WN_Linear(num_features, self.num_label, train_scale=True, init_stdv=0.1)
-
-        if ema:
-            for param in self.parameters():
-                param.detach_()
-        # Official init from torch repo.
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, X, feat=False):
-        if X.dim() == 2:
-            X = X.view(X.size(0), 3, self.side, self.side)
-
-        X = self.core_net(X)
-        X = self.dense_net(X)
-        if feat:
-            return X
-        else:
-            return self.out_net(X)
-'''

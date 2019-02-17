@@ -18,6 +18,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.colors import LinearSegmentedColormap
 # from sklearn.preprocessing import scale
 from sklearn.manifold import TSNE
 # from PIL import Image
@@ -48,22 +49,41 @@ class Tester(object):
             print("log config covering...")
         logger = open(log_path, 'r')
 
+        keep_str = ['dis_channels']
+        keep_val = ['last_epochs', 'last_epo_lbl']
         for li in logger:
             if "|" in li: break
             key, val = li.split(" : ")
-            val = self.int_float_bool(val[:-1])
-            if hasattr(config, key) and key != 'last_epochs':
-                setattr(self.config, key, val)
+            val = val[:-1]  # abort \n
+            if key in keep_val:
+                continue
+            elif key not in keep_str:
+                val = self.int_float_bool(val)
+            setattr(self.config, key, val)
         logger.close()
 
         # self.labeled_loader, self.unlabeled_loader, self.dev_loader, self.special_set = data.get_cifar_loaders_test(
         #     config)
-        self.loaders = data.get_cifar_loaders_test(config)
-        self.dis = model.Discriminative(config).cuda()
-        self.ema_dis = model.Discriminative(config).cuda()  # , ema=True).cuda()
-        if hasattr(self.config, 'gen_mode') and self.config.gen_mode != "non":
-            self.gen = model.generator(image_size=config.image_size, noise_size=config.noise_size,
-                                       large=config.double_input_size, gen_mode=config.gen_mode).cuda()
+        self.loaders = data.get_data_loaders_test(config)
+        if config.mu:
+            self.label_list = range(config.num_label)
+            in_channels = [int(i) for i in config.dis_channels.split(",")]
+            self.dis = model.Unet_Discriminator(config, in_channels=in_channels).cuda()
+            self.ema_dis = model.Unet_Discriminator(config, in_channels=in_channels).cuda()
+        else:
+            self.dis = model.Discriminative(config).cuda()
+            self.ema_dis = model.Discriminative(config).cuda()  # , ema=True).cuda()
+
+        if config.mu:
+            self.gen = nn.ModuleList()
+            self.gen.append(model.UNetWithResnet50Encoder(n_classes=3, res=config.gen_mode).cuda())
+            for i in range(config.num_label-1):
+                self.gen.append(model.Resnet50Decoder_skip(n_classes=3, res=config.gen_mode).cuda())
+        elif hasattr(self.config, 'gen_mode') and self.config.gen_mode != "non":
+            self.gen = model.generator(image_side=config.image_side,
+                                       noise_size=config.noise_size,
+                                       large=config.double_input_size,
+                                       gen_mode=config.gen_mode).cuda()
 
         dis_para = [{'params': self.dis.parameters()}, ]
         if 'm' in config.dis_mode:  # svhn: 168; cifar:192
@@ -74,7 +94,7 @@ class Tester(object):
             dis_para.append({'params': self.dis_dou.parameters()})
 
         if config.gen_mode == "z2i":
-            self.enc = model.Encoder(config.image_size, noise_size=config.noise_size, output_params=True).cuda()
+            self.enc = model.Encoder(config.image_side, noise_size=config.noise_size, output_params=True).cuda()
 
         self.d_criterion = nn.CrossEntropyLoss()
         if config.consistency_type == 'mse':
@@ -102,6 +122,10 @@ class Tester(object):
 
         # for tsne
         self.gen_feat = None
+        self.p_fs = tuple([ int(i) for i in self.config.p_fs.split(",")])
+        # for mu
+        self.img_per_cls = None
+
 
     def int_float_bool(self, value):
         try:
@@ -132,6 +156,14 @@ class Tester(object):
         gram = features.bmm(features_t) / (ch * h * w)
         return gram
 
+    def get_feat(self, images, mu_layers=5, ema=False):
+        if self.config.mu:
+            return self.gen[0](images, encode=True)
+        else:
+            if ema:
+                return self.ema_dis(images, feat=True)
+            return self.dis(images, feat=True)
+
     def eval_true_fake(self, data_loader, max_batch=None):
         self.gen.eval()
         self.dis.eval()
@@ -145,10 +177,13 @@ class Tester(object):
             images = Variable(images.cuda(), volatile=True)
             if self.config.gen_mode == "z2i":
                 noise = Variable(torch.Tensor(images.size(0), self.config.noise_size).uniform_().cuda(), volatile=True)
-                gen_feat = self.dis(self.gen(noise), feat=True)
+                gen_feat = self.get_feat(self.gen(noise))
             elif self.config.gen_mode == "i2i":
-                gen_feat = self.dis(self.gen(images), feat=True)
-            unl_feat = self.dis(images, feat=True)
+                gen_feat = self.get_feat(self.gen(images))
+            else:
+                gen_feat = self.get_feat(self.gen[i%self.config.num_label](images))
+
+            unl_feat = self.get_feat(images)
 
             unl_logits = self.dis.out_net(unl_feat)
             gen_logits = self.dis.out_net(gen_feat)
@@ -183,7 +218,7 @@ class Tester(object):
             dis_out = self.dis_dou.out_net3
         else:  # 1
             dis_out = self.dis_dou.out_net2
-        # self.gen.eval()
+        self.gen.eval()
         dis.eval()
         # self.enc.eval()
 
@@ -191,7 +226,7 @@ class Tester(object):
         for i, (images, labels) in enumerate(data_loader.get_iter()):
             images = Variable(images.cuda(), volatile=True)
             labels = Variable(labels.cuda(), volatile=True)
-            feat = dis(images, feat=True)
+            feat = self.get_feat(images, ema=ema)
             pred_prob = dis_out(feat)
             loss += self.d_criterion(pred_prob, labels).data[0]
             cnt += 1
@@ -202,9 +237,12 @@ class Tester(object):
 
     def visualize_iter(self, data_loader=None, bsize=400, iters=1, data_suffix="g", gzlab=-1):
         assert data_loader is not None or "g" in data_suffix, "g or loader"
-        iter_num = lambda a, b: int((len(a) + b - 1) / b)
-        if data_loader is not None:
+        iter_num = lambda a, b: int((len(a) + b - 1) // b)
+        if data_loader is not None and ("g" not in data_suffix or iters == -1):
             iters = iter_num(data_loader, bsize)
+        elif iters != -1 and self.config.declbl and self.config.mu:
+            iters = iter_num(data_loader, bsize)
+
         nrow = int(bsize ** 0.5)
         start_time = time.time()
         first_str = "{} iters: {}".format(data_suffix, iters)
@@ -220,8 +258,6 @@ class Tester(object):
     def visualize(self, data_loader=None, vis_size=100, data_suffix="g", nrow=10, gzlab=-1):
         self.gen.eval()
         self.dis.eval()
-        # self.enc.eval()
-
         # vis_size = 100
         lab = None
         if self.config.gen_mode == "z2i" and data_loader is None:
@@ -234,7 +270,19 @@ class Tester(object):
             else:
                 noise = Variable(torch.Tensor(vis_size, self.config.noise_size).uniform_().cuda())
             gen_images = self.gen(noise)
-        elif "g" not in data_suffix and data_loader is not None:
+        elif self.config.gen_mode == "i2i":
+            gen_images = []
+            cnt = 0
+            while (True):
+                images, _ = data_loader.next()
+                images = Variable(images.cuda(), volatile=True)
+                gen_image = self.gen(images)
+                gen_images.append(gen_image)
+                cnt += data_loader.batch_size
+                if cnt + data_loader.batch_size > vis_size:
+                    break
+            gen_images = torch.cat(gen_images, 0)
+        elif "g" not in data_suffix and data_loader is not None:    # just image
             gen_images = None
             i, cnt = 0, 0
             while (True):
@@ -247,39 +295,84 @@ class Tester(object):
                     gen_images = torch.cat((gen_images, images), 0)
                     lab = torch.cat((lab, labs), 0)
                 i += 1
-                cnt += labs.size(0)
-                if cnt + labs.size(0) > vis_size:
+                cnt += data_loader.batch_size
+                if cnt + data_loader.batch_size > vis_size:
                     break
-        elif self.config.gen_mode == "i2i":
-            gen_images = None
-            i, cnt = 0, 0
+        elif self.config.declbl and self.config.mu:
+            gen_images = []
+            for i in range(self.config.num_label):
+                gen_images.append([])
+            cnt = 0
+            img_per_cls = np.zeros(self.config.num_label, dtype=int)
+            while (True):
+                images, labs = data_loader.next()
+                images = Variable(images.cuda(), volatile=True)
+                inp_feat = self.gen[0](images, skip_encode=True)
+                for i in range(self.config.num_label):
+                    i_count = sum(labs == i)
+                    if i_count == 0:
+                        continue
+                    img_per_cls[i] += i_count
+                    inds = (labs == i).nonzero().squeeze().cuda()
+                    i_feat = dict()
+                    for j in inp_feat.keys():
+                        i_feat[j] = inp_feat[j][inds,:,:,:]
+                    gen_image = self.gen[i].decode(i_feat)
+                    gen_images[i].append(gen_image)
+                cnt += data_loader.batch_size
+                if cnt + data_loader.batch_size > vis_size:
+                    break
+            for i in range(self.config.num_label):
+                if len(gen_images[i]) != 0:
+                    gen_images[i] = torch.cat(gen_images[i], 0)
+        elif self.config.mu:   # mu
+            gen_images = []
+            cnt = 0
+            img_per_cls = data_loader.batch_size    # // self.config.num_label
             while (True):
                 images, _ = data_loader.next()
                 images = Variable(images.cuda(), volatile=True)
-                gen_image = self.gen(images)
-                if i == 0:
-                    gen_images = gen_image
-                else:
-                    gen_images = torch.cat((gen_images, gen_image), 0)
-
-                cnt += images.size(0)
-                if cnt + images.size(0) > vis_size:
+                for i in range(self.config.num_label):
+                    inp_feat = self.gen[0](images, skip_encode=True)    # , [range(i*img_per_cls, (i+1)*img_per_cls)], skip_encode=True)
+                    gen_image = self.gen[i].decode(inp_feat)
+                    gen_images.append(gen_image)
+                cnt += img_per_cls * self.config.num_label
+                if cnt + img_per_cls * self.config.num_label > vis_size:
                     break
+            for i in range(self.config.num_label):
+                gen_images = torch.cat(gen_images, 0)
 
         # for tsne
         if "g" in data_suffix and self.config.tsne:
-            feat = self.dis(gen_images, feat=True).data
-            if self.gen_feat is None:
-                self.gen_feat = feat
+            if self.config.mu and self.config.declbl:   # may diff # every cls
+                if self.gen_feat is None:
+                    self.gen_feat = [None] * self.config.num_label
+                for i in range(self.config.num_label):
+                    if img_per_cls[i] != 0:
+                        feat = self.get_feat(gen_images[i]).data
+                        if self.gen_feat[i] is None:
+                            self.gen_feat[i] = feat
+                        else:
+                            self.gen_feat[i] = torch.cat((self.gen_feat[i], feat), dim=0)
+                if self.img_per_cls is None:
+                    self.img_per_cls = img_per_cls
+                else:
+                    self.img_per_cls += img_per_cls
             else:
-                self.gen_feat = torch.cat((self.gen_feat, feat), dim=0)
+                feat = self.get_feat(gen_images).data
+                if self.config.mu and self.img_per_cls is None:
+                    self.img_per_cls = img_per_cls
+                if self.gen_feat is None:
+                    self.gen_feat = feat
+                else:
+                    self.gen_feat = torch.cat((self.gen_feat, feat), dim=0)
         if self.config.nsg:
             return
         save_path = os.path.join(self.config.save_dir,
                                  'Te{}.FM+VI.{}.{}.png'.format(self.config.dataset, self.config.suffix, data_suffix))
         vutils.save_image(gen_images.data.cpu(), save_path, normalize=True, range=(-1, 1), nrow=nrow)
         # dis true img
-        gen_logits = self.dis(gen_images)
+        gen_logits = self.dis.out_net(self.get_feat(gen_images))
         # pdb.set_trace()
         # self.visualize_accs(gen_images, gen_logits, data_suffix)
         # gen_images = Variable(torch.Tensor([batch, 3, 32, 32])).cuda
@@ -333,7 +426,7 @@ class Tester(object):
         save_path = os.path.join(self.config.save_dir,
                                  'Te{}.FM+VI.{}.{}.txt'.format(self.config.dataset, self.config.suffix, data_suffix))
         save_str = ""
-        topk = 10
+        topk = self.config.num_label
         val, ind = torch.topk(gen_logits, topk)
         val, ind = val.data.cpu().numpy(), ind.data.cpu().numpy()
         acc, max_acc = acc.cpu().numpy(), max_acc.cpu().numpy()
@@ -374,6 +467,9 @@ class Tester(object):
         if "u" in data_suffix:
             cifar_feats, u_lbls = self.eval_feats(self.loaders[0], data="u")
             lbls = u_lbls.copy()
+            # if self.config.te:
+            #     cifar_feats = cifar_feats[:1000]
+            #     lbls = lbls[:1000]
         if "l" in data_suffix :
             if not len(self.loaders) > 2:
                 print("You cannot plot {}".format(data_suffix))
@@ -395,13 +491,25 @@ class Tester(object):
                 cifar_feats = np.concatenate((cifar_feats, feats), axis=0)
                 lbls = np.concatenate((lbls, d_lbls), axis=0)
 
+        num_label = self.config.num_label
+        g_offset = 20 if self.config.dataset == "coil20" else 10
         # get fake feature
         if "g" in data_suffix:
-            # pdb.set_trace()
-            # if self.config.te:
-            #     g_lab = np.arange(10).repeat(10)
-            # else:
-            g_lab = np.array([self.config.num_label]).repeat(self.gen_feat.shape[0])
+            if self.config.mu and self.config.declbl:
+                num_label += self.config.num_label
+                g_lab = []
+                for i in range(self.config.num_label):
+                    g_lab.append(np.array([g_offset+i]*self.img_per_cls[i]))
+                g_lab = np.concatenate(g_lab)
+
+            elif self.config.mu:
+                num_label += self.config.num_label
+                iter_num = self.gen_feat.shape[0] / (self.img_per_cls * self.config.num_label)
+                g_lab = np.tile(np.arange(g_offset, g_offset+self.config.num_label).repeat(self.img_per_cls), iter_num)
+            else:
+                num_label += 1
+                g_lab = np.array([g_offset]).repeat(self.gen_feat.shape[0])
+
             if cifar_feats is None:
                 cifar_feats = self.gen_feat
                 lbls = g_lab
@@ -409,11 +517,10 @@ class Tester(object):
                 cifar_feats = np.concatenate((cifar_feats, self.gen_feat), axis=0)
                 lbls = np.concatenate((lbls, g_lab), axis=0)
 
-        num_label = self.config.num_label
 
         data_num = [u_lbls.shape[0],  g_lab.shape[0]] \
             if "g" in data_suffix and "u" in data_suffix else None
-        self.plot_scatter(cifar_feats, lbls, num_label+1, data_suffix, data_num)
+        self.plot_scatter(cifar_feats, lbls, data_suffix, data_num)
 
         if not self.config.banl == "":
             # pdb.set_trace()
@@ -424,33 +531,38 @@ class Tester(object):
             for i in ban_e:
                 ban_ind = np.concatenate((ban_ind, np.where(lbls == i)[0]), axis=0)
                 num_label -= 1
+                if self.config.mu:
+                    ban_ind = np.concatenate((ban_ind, np.where(lbls == g_offset+i)[0]), axis=0)
+                    num_label -= 1
             # ban_ind.sort()
             mask = np.ones(len(lbls), dtype=bool)
             mask[ban_ind] = False
             lbls2 = lbls[mask]
             cifar_feats2 = cifar_feats[mask]
-            data_num = [(u_lbls.shape[0]//10) *num_label,  g_lab.shape[0]] \
+            if self.config.mu:
+                num_ul = num_label // 2
+            else:
+                num_ul = num_label - 1
+            data_num = [(u_lbls.shape[0]//self.config.num_label) * num_ul,  g_lab.shape[0]] \
                 if "g" in data_suffix and "u" in data_suffix else None
-            self.plot_scatter(cifar_feats2, lbls2, num_label+1, data_suffix2, data_num)
+            self.plot_scatter(cifar_feats2, lbls2, data_suffix2, data_num)
 
         if not self.config.showlab == "":
-            data_num = [u_lbls.shape[0]//10,  g_lab.shape[0]] \
+            data_num = [u_lbls.shape[0]//self.config.num_label,  g_lab.shape[0]] \
                 if "g" in data_suffix and "u" in data_suffix else None
             for i in self.config.showlab.split(","):
                 data_suffix2 = data_suffix+"_" + i
                 show_e = int(i)
                 mask = np.where(lbls == show_e)[0]
-                mask = np.concatenate((mask, np.where(lbls == 10)[0]), axis=0)
+                mask = np.concatenate((mask, np.where(lbls == g_offset)[0]), axis=0)
                 # ban_ind.sort()
                 lbls2 = lbls[mask]
                 cifar_feats2 = cifar_feats[mask]
-                self.plot_scatter(cifar_feats2, lbls2, 2, data_suffix2, data_num)
+                self.plot_scatter(cifar_feats2, lbls2, data_suffix2, data_num)
 
-
-    def plot_scatter(self, feats, y_dist, lbl_num, data_suffix, data_num=None):
+    def plot_scatter(self, feats, y_dist, data_suffix, data_num=None):
         # x_dist = ts_feat
         # y_dist = lbls
-        # lbl_num = num_label + 1
         print("Plot tsne {}".format(data_suffix))
         splitul = False
         if "u" in data_suffix and "l" in data_suffix:
@@ -460,67 +572,136 @@ class Tester(object):
         if self.config.te:
             print("TSNE point num: {}".format(len(y_dist)))
         x_dist = TSNE(n_components=2).fit_transform(feats)
+        x_dist *= self.config.p_scale
         if self.config.te:
             print("after TSNE transform")
         # plot
         plt.ioff()
-        fig = plt.figure()
-        fig.add_subplot(111)
-        if lbl_num == 2:
-            cm = plt.cm.get_cmap('bwr', lbl_num)
+        # fig = plt.figure(figsize=self.p_fs, dpi=self.config.p_d)
+        # fig.add_subplot(111)
+        fig, ax = plt.subplots(figsize=self.p_fs, dpi=self.config.p_d)
+        if self.config.num_label <= 10:
+            colors = {-1: 'lightblue',
+                       0: '#FF7070',  1: '#FFAA70',  2: '#FFEB62',  3: '#C1FF62',  4: '#68FFAF',
+                       5: '#68FFFF',  6: '#76BBFF',  7: '#767FFF',  8: '#A476FF',  9: '#FF76FF',
+                      10: '#D20000', 11: '#C95000', 12: '#C9AE00', 13: '#78C900', 14: '#00C95E',
+                      15: '#03ACAC', 16: '#145FAB', 17: '#353EB9', 18: '#6134B9', 19: '#CA46CA'}
+                      #  0: 'salmon',  1: 'yellow',  2: 'lime',  3: 'orange',  4: 'dodgerblue',
+                      #  5: 'skyblue',  6: 'violet',  7: 'cyan',  8: 'pink',  9: 'palegreen',
+                      # 10: 'darkred', 11: 'tan', 12: 'limegreen', 13: 'darkorange', 14: 'steelblue',
+                      # 15: 'royalblue', 16: 'darkviolet', 17: 'darkcyan', 18: 'deeppink', 19: 'darkseagreen'}
         else:
-            cm = plt.cm.get_cmap('gist_rainbow', lbl_num)
-        sc = plt.scatter(x_dist[:, 0], x_dist[:, 1], c=y_dist, cmap=cm, marker=",", s=0.55, alpha=0.3)
-        # plt.scatter(x_dist[:, 0], x_dist[:, 1], c=y_dist, marker=",", s=0.5, alpha=0.3)
+            colors = {-1: 'lightblue',
+                       0: '#FFA680',  1: '#FFC980',  2: '#FFED80',  3: '#EFFF80',  4: '#CBFF80',  5: '#A6FF80',  6: '#82FF80',  7: '#80FFA2',  8: '#80FFC6',  9: '#80FFEB',
+                      10: '#80F1FF', 11: '#80CDFF', 12: '#80A9FF', 13: '#8084FF', 14: '#A080FF', 15: '#C480FF', 16: '#E980FF', 17: '#FF80F3', 18: '#FF80CF', 19: '#FF80AB',
+                      20: '#C00000', 21: '#C03600', 22: '#C06D00', 23: '#C0A300', 24: '#A6C000', 25: '#70C000', 26: '#3AC000', 27: '#03C000', 28: '#00C033', 29: '#00C06A',
+                      30: '#00C0A0', 31: '#00AAC0', 32: '#0073C0', 33: '#003DC0', 34: '#0006C0', 35: '#3000C0', 36: '#6600C0', 37: '#9D00C0', 38: '#C000AD', 39: '#C00076'}
+
+        unique_lbl = np.array(sorted(np.unique(y_dist)))
+        num_gls = len(colors)-1 # lbl<10: 21-1; el: 41-1
+        for i in range(-1, num_gls): # remove labels which are outside y_dist
+            if i not in unique_lbl:
+                colors.pop(i)
+        # remap key and label, start_label: ?; last lbl: num_gls
+        num_lbl = len(unique_lbl)
+        if self.config.mu:
+            g_min_lbl = num_gls - self.config.num_label + 1
+        else:
+            g_min_lbl = num_gls
+        if self.config.te:
+            print("unique_lbl: {}".format(unique_lbl))
+            print("num: {}; g_num: {}; gml: {}".format(num_lbl, np.sum(unique_lbl >= 10), g_min_lbl))
+        for i in range(num_lbl):
+            ori_lbl = unique_lbl[num_lbl-1-i]
+            new_lbl = num_gls-i
+            colors[new_lbl] = colors[ori_lbl]
+            del colors[ori_lbl]
+            y_dist[y_dist == ori_lbl] = new_lbl
+        co_keys = sorted(colors.keys())
+        co_list = [colors[i] for i in co_keys]
+        cm = LinearSegmentedColormap.from_list(
+            'plotcm', co_list, N=len(co_list))
+        for i in co_keys:
+            g_mask = y_dist == i
+            if i < g_min_lbl:
+                plt.scatter(x_dist[g_mask, 0], x_dist[g_mask, 1], c=colors[i], cmap=cm, marker="x",
+                            s=self.config.p_s, alpha=self.config.p_alpha)
+            else:
+                plt.scatter(x_dist[g_mask, 0], x_dist[g_mask, 1], c=colors[i], cmap=cm,
+                            marker="o", facecolors='none', edgecolors=colors[i],
+                            s=self.config.p_s, alpha=self.config.p_alpha)
+        # sc = plt.scatter(x_dist[:, 0], x_dist[:, 1], c=y_dist, cmap=cm, marker=",",
+        #                  s=self.config.p_s, alpha=self.config.p_alpha)
         x_min, x_max = x_dist[:, 0].min() - 1, x_dist[:, 0].max() + 1
         y_min, y_max = x_dist[:, 1].min() - 1, x_dist[:, 1].max() + 1
         plt.title('TSNE {}'.format(data_suffix))
-        plt.colorbar(sc)    # , ticks=range(lbl_num))
         plt.axis((x_min, x_max, y_min, y_max))
+        cax, _ = matplotlib.colorbar.make_axes(ax)
+        normalize = matplotlib.colors.Normalize(vmin=min(unique_lbl), vmax=max(unique_lbl))
+        cb = matplotlib.colorbar.ColorbarBase(cax, cmap=cm, norm=normalize)
+        # cb = plt.colorbar(cm)
+        cb.set_ticks([0, max(colors.keys())])
+        cb.set_ticklabels(["", ""])
         fig.canvas.draw()
         # save as image
         save_path = os.path.join(self.config.save_dir,
                                  'Te{}.FM+VI.{}.tsne.{}.png'.format(self.config.dataset, self.config.suffix, data_suffix))
         plt.savefig(save_path, bbox_inches='tight')
         plt.close('all')
-        # Now we can save it to a numpy array.
-        # npdata = np.fromstring(fig.canvas.tostring_rgb(), dtype=np.uint8, sep='')
-        # npdata = npdata.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-        # plt.close('all')
-        # image_pil = Image.fromarray(npdata)
-        # image_pil.save(save_path)
+
         # split u, l ver
         if splitul:
             data_suffix += '2'
             colors = {0: 'lightblue', 1: 'g', 2: 'r'}
-            lbl_str = {0: 'unlabel', 1: 'label', 2: 'gen'}
+            # lbl_str = {0: 'unlabel', 1: 'label', 2: 'gen'}
+            # from matplotlib.colors import LinearSegmentedColormap
+            cm = LinearSegmentedColormap.from_list(
+                'splitul', colors.values(), N=len(colors))
             ist = {0: 0, 1: data_num[0], 2: - data_num[1]}
             ied = {0: data_num[0], 2: None} # 0: u_lbls.shape[0], 1: u_lbls.shape[0] + l_lbls.shape[0]
-            # co = [colors[i] for i in lbls]
             plt.ioff()
-            fig = plt.figure()
+            fig = plt.figure(figsize=self.p_fs, dpi=self.config.p_d)
             fig.add_subplot(111)
             # draw the figure first...
             for g in colors.keys(): # u, g
-                # ix = np.where(lbls == g)
                 if g == 1:
                     if "_" in data_suffix:
                         continue
-                    load_dir = os.path.dirname(self.config.save_dir)
-                    ind_path = os.path.join(load_dir,
-                                            '{}.FM+VI.{}.lind.npy'.format(
-                                                self.config.dataset, self.config.suffix))
-                    ix = np.load(ind_path)
-                    x0 = x_dist[ix, 0]
-                    x1 = x_dist[ix, 1]
+                    assert len(self.loaders) >= 4, "no label ind"
+                    ix = self.loaders[3]
+                    ix = ix[ix < x_dist.shape[0]]
+                    y_dist[ix] = g
                 else:
-                    x0 = x_dist[ist[g]:ied[g], 0]
-                    x1 = x_dist[ist[g]:ied[g], 1]
-                plt.scatter(x0, x1,
-                            c=colors[g], label=lbl_str[g],
-                            marker=",", s=0.55, alpha=0.3)
-            plt.legend(loc=10, scatterpoints=1, bbox_to_anchor=(1.11, 0.91))
+                    y_dist[ist[g]:ied[g]] = g
+            sc = plt.scatter(x_dist[:, 0], x_dist[:, 1], c=y_dist, cmap=cm, marker=",",
+                             s=self.config.p_s, alpha=self.config.p_alpha)
             plt.title('TSNE {}'.format(data_suffix))
+            cb = plt.colorbar(sc)
+            cb.set_ticks([0, colors.keys()[-1]])
+            cb.set_ticklabels(["", ""])
+            plt.axis((x_min, x_max, y_min, y_max))
+            fig.canvas.draw()
+            # save as image
+            save_path = os.path.join(self.config.save_dir,
+                                     'Te{}.FM+VI.{}.tsne.{}.png'.format(self.config.dataset, self.config.suffix, data_suffix))
+            plt.savefig(save_path, bbox_inches='tight')
+            plt.close('all')
+            # plot ul
+            data_suffix = data_suffix[:-1]+"3"
+            colors.pop(2)
+            cm = LinearSegmentedColormap.from_list(
+                'gul3', colors.values(), N=len(colors))
+            fig = plt.figure(figsize=self.p_fs, dpi=self.config.p_d)
+            fig.add_subplot(111)
+            g_mask = y_dist != 2
+            x_dist = x_dist[g_mask]
+            y_dist = y_dist[g_mask]
+            sc = plt.scatter(x_dist[:, 0], x_dist[:, 1], c=y_dist, cmap=cm, marker=",",
+                             s=self.config.p_s, alpha=self.config.p_alpha)
+            plt.title('TSNE {}'.format(data_suffix))
+            cb = plt.colorbar(sc)
+            cb.set_ticks([0, colors.keys()[-1]])
+            cb.set_ticklabels(["", ""])
             plt.axis((x_min, x_max, y_min, y_max))
             fig.canvas.draw()
             # save as image
@@ -550,7 +731,7 @@ class Tester(object):
             dis = self.ema_dis
         else:
             dis = self.dis
-        # self.gen.eval()
+        self.gen.eval()
         dis.eval()
         # self.enc.eval()
         # if self.config.te:
@@ -559,7 +740,7 @@ class Tester(object):
         for i, (images, labels) in enumerate(data_loader.get_iter(shuffle=False)):
             images = Variable(images.cuda(), volatile=True)
             labels = Variable(labels.cuda(), volatile=True)
-            feat = dis(images, feat=True)
+            feat = self.get_feat(images, ema=ema)
             if i == 0:
                 feats = feat.data.clone()
                 lbls  = labels.data.clone()
@@ -600,7 +781,7 @@ class Tester(object):
             return
         load_net = torch.load(load_path)
         net.cpu()
-        net.load_my_state_dict(load_net)
+        model.load_my_state_dict(net, load_net)
 
         if torch.cuda.is_available():
             net.cuda()
@@ -622,6 +803,10 @@ class Tester(object):
         batch_per_epoch = int((len(self.loaders[0]) + config.train_batch_size - 1) / config.train_batch_size)
 
         iter_num = batch_per_epoch * (config.last_epochs - 1)
+        if config.last_epo_lbl != 0:
+            iter_num = config.last_epo_lbl
+        if config.mu:
+            config.suffix = "{}_s{}".format(config.suffix, config.train_step)
         self.resume(iter_num)
 
         # turn save_dir into another folder
@@ -634,29 +819,47 @@ class Tester(object):
             gzlab = config.num_label
 
         if config.te:
-            config.gen_iter = 1
+            config.gen_iter = 2
         if config.gen_iter == 1:
             if config.gen_mode == "z2i":
                 self.visualize(gzlab=gzlab)
-            elif config.gen_mode == "i2i":
-                self.visualize(self.loaders[1])
+            else:
+                self.visualize(self.loaders[0])
         else:
-            self.visualize_iter(bsize=100, iters=config.gen_iter, data_suffix="g", gzlab=gzlab)
+            if config.gen_mode == "z2i":
+                self.visualize_iter(bsize=100, iters=config.gen_iter,
+                                    data_suffix="g", gzlab=gzlab)
+            else:
+                self.visualize_iter(data_loader=self.loaders[0], bsize=self.loaders[0].batch_size,
+                                    iters=config.gen_iter, data_suffix="g", gzlab=gzlab)
 
         if config.alldata:
             print("loader num: {}".format(len(self.loaders)))
             self.visualize_iter(self.loaders[1], 400, data_suffix="d")
             self.visualize_iter(self.loaders[0], 400, data_suffix="u")
-            if len(self.loaders) == 3:
+            if len(self.loaders) >= 3:
                 self.visualize_iter(self.loaders[2], 400, data_suffix="l")
         if config.tsne:
             if hasattr(self, 'gen'):
+                if self.config.mu and self.config.declbl:
+                    if config.gen_iter != -1:
+                        assert config.gen_iter * self.loaders[0].batch_size <= len(self.loaders[0]), \
+                            "out of dataset: {}*{} > {}".format(config.gen_iter, self.loaders[0].batch_size,
+                                                                len(self.loaders[0]))
+                        img_num = config.gen_iter * self.loaders[0].batch_size // config.num_label
+                        self.img_per_cls = [img_num] * config.num_label
+                        for i in range(config.num_label):
+                            self.gen_feat[i] = self.gen_feat[i][:img_num]
+                    self.gen_feat = torch.cat(self.gen_feat, 0)
+                    print("# gen_feat: {}; ipc: {}".format(self.gen_feat.size(0), self.img_per_cls))
                 self.gen_feat = self.gen_feat.cpu().numpy()
             if config.te:
                 # self.tsne("g")  # t1\
-                # self.tsne("gul")
-                self.tsne("gu")
+                self.tsne("gul")
+                # self.tsne("gu")
             else:
+                if config.mu:
+                    self.tsne("g")
                 self.tsne("gu")
                 self.tsne("gl")
                 self.tsne("gul")
@@ -665,13 +868,17 @@ class Tester(object):
 
 if __name__ == '__main__':
     cc = config.cifarmg_config()
-    parser = argparse.ArgumentParser(description='cifarmg_trainer.py')
+    parser = argparse.ArgumentParser(description='cifarmg_tester.py')
     parser.add_argument('-suffix', default='mg0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', dest='resume', action='store_true')
+    parser.add_argument('-dataset', default=cc.dataset, type=str,
+                        help="dataset: cifar, stl10, coil20")
     parser.add_argument('-last_epochs', default=cc.last_epochs, type=int,
                         help="last epochs")
+    parser.add_argument('-last_epo_lbl', default=0, type=int,
+                        help="last epoch lbl")
     parser.add_argument('-gen_iter', default=1, type=int,
-                        help="gen iteration times")
+                        help="gen iteration times. def: 1; full: -1")
     parser.add_argument('-cmp', default='winter', type=str,
                         help="color map name")
     parser.add_argument('-alldata', dest='alldata', action='store_true',
@@ -686,14 +893,32 @@ if __name__ == '__main__':
                         help="the lab num be ignored on tsne. ex: 0,1,2")
     parser.add_argument('-showlab', default='', type=str,
                         help="the only lab num be shown on tsne. ex: 0,1")
+    parser.add_argument('-p_fs', default='12,9', type=str,
+                        help="plot fig size, def: 12,9")
+    parser.add_argument('-p_d', default=300, type=int,
+                        help="plot dpi, def: 300")
+    parser.add_argument('-p_scale', default=20.0, type=float,
+                        help="plot point scale, def: 20.0")
+    parser.add_argument('-p_s', default=20.0, type=float,
+                        help="plot s, def: 20.0")
+    parser.add_argument('-p_alpha', default=0.5, type=float,
+                        help="plot alpha, def:0.5")
     parser.add_argument('-te', dest='te', action='store_true',
                         help="just for test colorbar")
+    parser.add_argument('-mu', dest='mu', action='store_true',
+                        help="mu series: G(En De), D(Classifier)")
+    parser.add_argument('-dl', dest='declbl', action='store_true',
+                        help="mu series: decode same label image")
     parser.set_defaults(alldata=False)
     parser.set_defaults(gzlab=False)
     parser.set_defaults(tsne=False)
     parser.set_defaults(nsg=False)
     parser.set_defaults(te=False)
+    parser.set_defaults(mu=False)
+    parser.set_defaults(declbl=False)
 
+    parser.add_argument('-image_side', default="32", type=int,
+                        help="cifar: 32, stl10: 96")
     parser.add_argument('-noise_size', default=cc.noise_size, type=int,
                         help="gen noise size")
     parser.add_argument('-train_batch_size', default=cc.train_batch_size, type=int,
@@ -703,10 +928,14 @@ if __name__ == '__main__':
     parser.add_argument('-gen_mode', default=cc.gen_mode, type=str,
                         help="gen model mode: z2i, i2i")
 
-    parser.add_argument('-d', dest='double_input_size', action='store_true')
-    parser.add_argument('-f', dest='flip', action='store_true')
-    parser.add_argument('-dd', dest='dis_double', action='store_true')
-    parser.add_argument('-dt', dest='dis_triple', action='store_true')
+    parser.add_argument('-d', dest='double_input_size', action='store_true',
+                        help="double input size")
+    parser.add_argument('-f', dest='flip', action='store_true',
+                        help="flip input or not")
+    parser.add_argument('-dd', dest='dis_double', action='store_true',
+                        help="dis double")
+    parser.add_argument('-dt', dest='dis_triple', action='store_true',
+                        help="dis tri")
     parser.set_defaults(resume=False)
     parser.set_defaults(double_input_size=cc.double_input_size)
     parser.set_defaults(flip=cc.flip)

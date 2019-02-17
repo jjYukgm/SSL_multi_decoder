@@ -36,7 +36,7 @@ class Trainer(object):
         sys.stdout.write(disp_str)
         sys.stdout.flush()
 
-        self.labeled_loader, self.unlabeled_loader, self.unlabeled_loader2, self.dev_loader, self.special_set = data.get_cifar_loaders(config)
+        self.labeled_loader, self.unlabeled_loader, self.dev_loader, self.special_set = data.get_cifar_loaders(config)
 
         self.dis = model.Discriminative(config).cuda()
         self.ema_dis = model.Discriminative(config, ema=True).cuda()

@@ -2,6 +2,7 @@
 cifar/*
 mnist/*
 svhn/*
+data/*
 model/*
 .idea/*
 *_log/*
