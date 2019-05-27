@@ -114,8 +114,11 @@ class Trainer(object):
         gen_images = self.gen(noise)
 
         # Entropy loss via variational inference
-        mu, log_sigma = self.enc(gen_images)
-        vi_loss = gaussian_nll(mu, log_sigma, noise)
+        vi_loss = 0
+        if config.vi_weight > 0:
+            mu, log_sigma = self.enc(gen_images)
+            vi_loss = gaussian_nll(mu, log_sigma, noise)
+            vi_loss *= config.vi_weight
 
         # Feature matching loss
         unl_feat = self.dis(unl_images, feat=True)
@@ -123,7 +126,7 @@ class Trainer(object):
         fm_loss = torch.mean(torch.abs(torch.mean(gen_feat, 0) - torch.mean(unl_feat, 0)))
 
         # Generator loss
-        g_loss = fm_loss + config.vi_weight * vi_loss
+        g_loss = fm_loss + vi_loss
         
         self.gen_optimizer.zero_grad()
         self.enc_optimizer.zero_grad()
@@ -138,9 +141,9 @@ class Trainer(object):
                        ('max gen acc' , max_gen_acc.data[0]), 
                        ('lab loss' , lab_loss.data[0]),
                        ('unl loss' , unl_loss.data[0]),
-                       ('fm loss' , fm_loss.data[0]),
-                       ('vi loss' , vi_loss.data[0])
+                       ('fm loss' , fm_loss.data[0])
                    ])
+        if config.vi_weight > 0: monitor_dict['vi loss'] = vi_loss.data[0]
                 
         return monitor_dict
 
@@ -392,6 +395,8 @@ if __name__ == '__main__':
                         help="evaluate period, -1: per-epoch")
     parser.add_argument('-vis_period', default=cc.vis_period, type=int,
                         help="visualize period, -1: per-epoch")
+    parser.add_argument('-vi_weight', default=cc.vi_weight, type=float,
+                        help="def: 1e-2")
 
     args = parser.parse_args()
     trainer = Trainer(cc, args)

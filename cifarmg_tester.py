@@ -76,9 +76,9 @@ class Tester(object):
 
         if config.mu:
             self.gen = nn.ModuleList()
-            self.gen.append(model.UNetWithResnet50Encoder(n_classes=3, res=config.gen_mode).cuda())
+            self.gen.append(model.UNetWithResnetEncoder(n_classes=3, res=config.gen_mode).cuda())
             for i in range(config.num_label-1):
-                self.gen.append(model.Resnet50Decoder_skip(n_classes=3, res=config.gen_mode).cuda())
+                self.gen.append(model.ResnetDecoder_skip(n_classes=3, res=config.gen_mode).cuda())
         elif hasattr(self.config, 'gen_mode') and self.config.gen_mode != "non":
             self.gen = model.generator(image_side=config.image_side,
                                        noise_size=config.noise_size,
@@ -240,7 +240,7 @@ class Tester(object):
         iter_num = lambda a, b: int((len(a) + b - 1) // b)
         if data_loader is not None and ("g" not in data_suffix or iters == -1):
             iters = iter_num(data_loader, bsize)
-        elif iters != -1 and self.config.declbl and self.config.mu:
+        elif iters != -1 and self.config.declbl and self.config.mu and not self.config.nstf:
             iters = iter_num(data_loader, bsize)
 
         nrow = int(bsize ** 0.5)
@@ -298,9 +298,42 @@ class Tester(object):
                 cnt += data_loader.batch_size
                 if cnt + data_loader.batch_size > vis_size:
                     break
-        elif self.config.declbl and self.config.mu:
+        elif self.config.declbl and self.config.mu and not self.config.tsne \
+                and not self.config.nsg and self.config.nstf: # category-wised img in a row
+            ori_images = []
             gen_images = []
             for i in range(self.config.num_label):
+                ori_images.append([])
+                gen_images.append([])
+            while (True):
+                cnt = 0
+                images, labs = data_loader.next()
+                for i in range(self.config.num_label):
+                    i_count = sum(labs == i)
+                    if i_count == 0 and len(ori_images[i]) == 0:
+                        cnt += 1
+                    if i_count == 0 or len(ori_images[i]) > 0:
+                        continue
+                    inds = (labs == i).nonzero().squeeze()
+                    ori_images[i] = images[inds,:,:,:][0].unsqueeze(0)
+                if cnt == 0:
+                    break
+            ori_images = torch.cat(ori_images, 0)
+            ori_images = Variable(ori_images.cuda(), volatile=True)
+            inp_feat = self.gen[0](ori_images, skip_encode=True)
+            for i in range(self.config.num_label):
+                gen_image = self.gen[i].decode(inp_feat)
+                gen_images[i].append(gen_image)
+            for i in range(self.config.num_label):
+                gen_images[i] = torch.cat(gen_images[i], 0) # .squeeze(0).transpose(0, 1)
+            o_size = ori_images.size()
+            gen_images = torch.stack(gen_images, 0).transpose(0, 1).contiguous().view(-1, o_size[1], o_size[2], o_size[3])
+            # gen_images = torch.cat(gen_images, 0)
+        elif self.config.declbl and self.config.mu:
+            ori_images = []
+            gen_images = []
+            for i in range(self.config.num_label):
+                ori_images.append([])
                 gen_images.append([])
             cnt = 0
             img_per_cls = np.zeros(self.config.num_label, dtype=int)
@@ -318,29 +351,33 @@ class Tester(object):
                     for j in inp_feat.keys():
                         i_feat[j] = inp_feat[j][inds,:,:,:]
                     gen_image = self.gen[i].decode(i_feat)
+                    ori_images[i].append(images[inds,:,:,:])
                     gen_images[i].append(gen_image)
                 cnt += data_loader.batch_size
                 if cnt + data_loader.batch_size > vis_size:
                     break
             for i in range(self.config.num_label):
                 if len(gen_images[i]) != 0:
+                    ori_images[i] = torch.cat(ori_images[i], 0)
                     gen_images[i] = torch.cat(gen_images[i], 0)
         elif self.config.mu:   # mu
+            ori_images = []
             gen_images = []
             cnt = 0
             img_per_cls = data_loader.batch_size    # // self.config.num_label
             while (True):
                 images, _ = data_loader.next()
                 images = Variable(images.cuda(), volatile=True)
+                ori_images.append(images)
+                inp_feat = self.gen[0](images, skip_encode=True)    # , [range(i*img_per_cls, (i+1)*img_per_cls)], skip_encode=True)
                 for i in range(self.config.num_label):
-                    inp_feat = self.gen[0](images, skip_encode=True)    # , [range(i*img_per_cls, (i+1)*img_per_cls)], skip_encode=True)
                     gen_image = self.gen[i].decode(inp_feat)
                     gen_images.append(gen_image)
                 cnt += img_per_cls * self.config.num_label
                 if cnt + img_per_cls * self.config.num_label > vis_size:
                     break
-            for i in range(self.config.num_label):
-                gen_images = torch.cat(gen_images, 0)
+            ori_images = torch.cat(ori_images, 0)
+            gen_images = torch.cat(gen_images, 0)
 
         # for tsne
         if "g" in data_suffix and self.config.tsne:
@@ -368,9 +405,22 @@ class Tester(object):
                     self.gen_feat = torch.cat((self.gen_feat, feat), dim=0)
         if self.config.nsg:
             return
+        if type(gen_images) == list:
+            ori_images = torch.cat(ori_images, 0)
+            gen_images = torch.cat(gen_images, 0)
+
+        if self.config.declbl and self.config.mu and not self.config.tsne \
+                and not self.config.nsg and self.config.nstf:
+            nrow = gen_images.size(0) // self.config.num_label
         save_path = os.path.join(self.config.save_dir,
                                  'Te{}.FM+VI.{}.{}.png'.format(self.config.dataset, self.config.suffix, data_suffix))
         vutils.save_image(gen_images.data.cpu(), save_path, normalize=True, range=(-1, 1), nrow=nrow)
+        if "g" in data_suffix and data_loader is not None:
+            save_path = os.path.join(self.config.save_dir,
+                                     'Te{}.FM+VI.{}.{}_ori.png'.format(self.config.dataset, self.config.suffix, data_suffix))
+            vutils.save_image(ori_images.data.cpu(), save_path, normalize=True, range=(-1, 1), nrow=1)
+        if self.config.nstf:
+            return
         # dis true img
         gen_logits = self.dis.out_net(self.get_feat(gen_images))
         # pdb.set_trace()
@@ -887,6 +937,8 @@ if __name__ == '__main__':
                         help="Gen z add label")
     parser.add_argument('-nsg', dest='nsg', action='store_true',
                         help="no save gen img")
+    parser.add_argument('-nstf', dest='nstf', action='store_true',
+                        help="no save gen true/fake ana")
     parser.add_argument('-tsne', dest='tsne', action='store_true',
                         help="plot tsne")
     parser.add_argument('-banl', default='', type=str,
@@ -913,6 +965,7 @@ if __name__ == '__main__':
     parser.set_defaults(gzlab=False)
     parser.set_defaults(tsne=False)
     parser.set_defaults(nsg=False)
+    parser.set_defaults(nstf=False)
     parser.set_defaults(te=False)
     parser.set_defaults(mu=False)
     parser.set_defaults(declbl=False)

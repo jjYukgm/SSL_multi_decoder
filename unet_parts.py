@@ -39,14 +39,14 @@ class Bridge(nn.Module):
         return self.bridge(x)
 
 
-class UpBlockForUNetWithResNet50(nn.Module):
+class UpBlockForUNetWithResNet(nn.Module):
     """
     Up block that encapsulates one up-sampling step which consists of Upsample -> ConvBlock -> ConvBlock
     """
 
     def __init__(self, in_channels, out_channels, up_conv_in_channels=None, up_conv_out_channels=None,
                  upsampling_method="conv_transpose"):
-        super(UpBlockForUNetWithResNet50, self).__init__()
+        super(UpBlockForUNetWithResNet, self).__init__()
 
         if up_conv_in_channels == None:
             up_conv_in_channels = in_channels

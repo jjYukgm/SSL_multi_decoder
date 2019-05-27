@@ -47,9 +47,9 @@ class Trainer(object):
             = data.get_data_loaders(config)
 
         self.gen = nn.ModuleList()
-        self.gen.append(model.UNetWithResnet50Encoder(n_classes=3, res=config.gen_mode).cuda())
+        self.gen.append(model.UNetWithResnetEncoder(n_classes=3, res=config.gen_mode).cuda())
         for i in range(config.num_label-1):
-            self.gen.append(model.Resnet50Decoder_skip(n_classes=3, res=config.gen_mode).cuda())
+            self.gen.append(model.ResnetDecoder_skip(n_classes=3, res=config.gen_mode).cuda())
         if config.train_step != 1:
             batch_per_epoch = int((len(self.unlabeled_loader) + config.train_batch_size - 1) / config.train_batch_size)
             if config.step1_epo_lbl is not 0:
@@ -447,7 +447,7 @@ class Trainer(object):
                 fm_loss *= config.gf_weight
 
             if config.gc_weight > 0:
-                key_ = "layer_{}".format(model.UNetWithResnet50Encoder.DEPTH - 1)
+                key_ = "layer_{}".format(model.UNetWithResnetEncoder.DEPTH - 1)
                 feat_size = self.gen[0](unl_images, skip_encode=True)[key_][:img_per_gen*config.num_label].size()
                 rand_codes = Variable(torch.rand(feat_size).cuda())  # .unsqueeze(-1).unsqueeze(-1)
                 gen_rand_feat = self.gen[0](
@@ -679,14 +679,14 @@ class Trainer(object):
                 num_part.append(range(j*img_per_gen, (j+1)*img_per_gen))
         gen_feat = self.gen[0](images, skip_encode=True)
         if partcode:
-            lay_key = "layer_{}".format(model.UNetWithResnet50Encoder.DEPTH - 1)
+            lay_key = "layer_{}".format(model.UNetWithResnetEncoder.DEPTH - 1)
             keep_len = gen_feat[lay_key].size(1) // 2
             gn_size = gen_feat[lay_key][:,keep_len:].size()
             gen_feat[lay_key] = gen_feat[lay_key][:,:keep_len]
             gn = Variable(torch.rand(gn_size).cuda()) * 2
             gen_feat[lay_key] = torch.cat((gen_feat[lay_key], gn), 1)
         elif codes is not None:
-            lay_key = "layer_{}".format(model.UNetWithResnet50Encoder.DEPTH - 1)
+            lay_key = "layer_{}".format(model.UNetWithResnetEncoder.DEPTH - 1)
             # codes = codes[:gen_feat[lay_key].size(0)]
             gen_feat[lay_key] = codes
         for j in range(self.config.num_label):

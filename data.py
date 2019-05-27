@@ -74,6 +74,73 @@ class DataLoader(object):
     def __len__(self):
         return self.len
 
+class DataBatchLoader(object):
+    def __init__(self, config, raw_loader, indices, batch_size,
+                 transform=None, target_transform=None, img_side=224):
+        # todo: add str load img
+        self.folder_root = raw_loader.folder_root
+
+        self.images, self.labels = [], []
+        for idx in indices:
+            image, label = raw_loader[idx]
+            self.images.append(image)
+            self.labels.append(label)
+
+        self.images = np.array(self.images)
+        self.labels = np.array(self.labels, dtype=np.int64)
+        self.transform = transform
+        self.target_transform = target_transform
+        self.img_side = img_side
+        if config.num_label != 1000:  # reorder the label
+            lbl_range = np.unique(self.labels)
+            for i, j in enumerate(lbl_range):
+                self.labels[self.labels == j] = i
+        self.labels = torch.from_numpy(self.labels).squeeze()
+
+
+        self.batch_size = batch_size
+
+        self.unlimit_gen = self.generator(True)
+        self.len = len(indices)
+
+    def generator(self, inf=False, shuffle=True):
+        while True:
+            indices = np.arange(self.images.shape[0])
+            if shuffle:
+                np.random.shuffle(indices)
+            # indices = torch.from_numpy(indices)
+            for start in range(0, indices.shape[0], self.batch_size):
+                end = min(start + self.batch_size, indices.shape[0])
+                ret_images = self.__loadimg(indices[start: end])
+                lab_ind = torch.from_numpy(indices[start: end])
+                ret_labels = self.labels[lab_ind]
+                yield ret_images, ret_labels
+            if not inf: break
+
+    def next(self):
+        return next(self.unlimit_gen)
+
+    def get_iter(self, shuffle=True):
+        return self.generator(shuffle=shuffle)
+
+    def __len__(self):
+        return self.len
+
+    def __loadimg(self, inds):
+        fns = self.images[inds]
+        images = []
+        for fn in fns:
+            path_to_data = os.path.join(self.folder_root, fn)
+            data = Image.open(path_to_data).convert('RGB')  # HWC
+            data = data.resize((self.img_side, self.img_side), Image.ANTIALIAS)  # ANTIALIAS;BILINEAR
+            # transforms
+            if self.transform is not None:
+                data = self.transform(data)
+            images.append(data)
+
+        images = torch.stack(images, 0)
+        return images
+
 
 class coil20(CIFAR10):
     """`COIL20 <https://>`_ Dataset.
@@ -208,6 +275,73 @@ class coil20(CIFAR10):
         zf.extractall(root)
         zf.close()
         # os.chdir(cwd)
+
+
+class imagenet10(CIFAR10):
+    """`imagenet10 <https://>`_ Dataset.
+
+
+    """
+    base_folder = 'imagenet'
+    foldernames = ["ILSVRC2012_img_train", "ILSVRC2012_img_val", "ILSVRC2012_img_test"]
+
+    def __init__(self, root, splitpart, target_transform=None):
+        self.root = os.path.expanduser(root)
+        self.target_transform = target_transform
+        self.data = []
+        self.labels = []
+        if "train" in splitpart:
+            data, labels = self.__loadfile(self.foldernames[0], "train")
+            self.data.append(data)
+            self.labels.append(labels)
+        if "val" in splitpart:
+            data, labels = self.__loadfile(self.foldernames[1], "val")
+            self.data.append(data)
+            self.labels.append(labels)
+        if "test" in splitpart:
+            data, labels = self.__loadfile(self.foldernames[2], "test")
+            self.data.append(data)
+            self.labels.append(labels)
+        self.data = np.concatenate(self.data, axis=0)
+        self.labels = np.concatenate(self.labels, axis=0)
+        self.folder_root = os.path.join(self.root, self.base_folder)
+
+    def __getitem__(self, index):
+        """
+        Args:
+            index (int): Index
+
+        Returns:
+            tuple: (image_str, target) where target is index of the target class.
+        """
+        if self.labels is not None:
+            img, target = self.data[index], int(self.labels[index])
+        else:
+            img, target = self.data[index], None
+
+        # doing this so that it is consistent with all other datasets
+        # to return a PIL Image
+
+        if self.target_transform is not None:
+            target = self.target_transform(target)
+
+        return img, target
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __loadfile(self, foldername, labfname):
+        images = []
+        labels = []
+        fn = os.path.join(self.root, self.base_folder, "label", labfname+".txt")
+        fp = open(fn, "r")
+        for li in fp:
+            image, label = li.split(" ")
+            images.append(os.path.join(foldername, image))
+            labels.append(int(label[:-1]))   # cut '\n'
+        fp.close()
+
+        return images, labels
 
 
 def get_mnist_loaders(config):
@@ -515,7 +649,7 @@ def get_coil20_loaders_test(config, lab_ind=True):
     tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     # tr_list += [transforms.ToTensor(), transforms.Normalize((0.53, 0.53, 0.52), (0.29, 0.29, 0.28))]
     transform = transforms.Compose(tr_list)
-    all_set = coil20(config.data_root, download=True, transform=transform, img_side=config.image_side)  # untested
+    all_set = coil20(config.data_root, download=True, transform=transform, img_side=config.image_side)
 
     num_data = len(all_set)
     indices = np.arange(num_data)
@@ -562,7 +696,7 @@ def get_coil20_loaders(config):  # n*1*128*128
     tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     # tr_list += [transforms.ToTensor(), transforms.Normalize((0.53, 0.53, 0.52), (0.29, 0.29, 0.28))]
     transform = transforms.Compose(tr_list)
-    all_set = coil20(config.data_root, download=True, transform=transform, img_side=config.image_side)  # untested
+    all_set = coil20(config.data_root, download=True, transform=transform, img_side=config.image_side)
     # dev ratio:1040/1440; lab ratio: 20/1440
     # ref: https://github.com/csyanbin/Semi-supervised_Neural_Network/blob/master/utils/coil_data.py
 
@@ -633,6 +767,131 @@ def get_coil20_loaders(config):  # n*1*128*128
     return labeled_loader, unlabeled_loader, dev_loader, special_set
 
 
+def get_imagenet10_loaders_test(config, lab_ind=True):
+    tr_list = []
+    tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    # tr_list += [transforms.ToTensor(), transforms.Normalize((0.53, 0.53, 0.52), (0.29, 0.29, 0.28))]
+    transform = transforms.Compose(tr_list)
+    train_set = imagenet10(config.data_root, splitpart='trainval')  # untested
+    test_set = imagenet10(config.data_root, splitpart='test')  # untested
+
+    num_data = len(train_set)
+    indices = np.arange(num_data)
+    labels = np.array([train_set[i][1] for i in indices], dtype=np.int64)
+    mask2 = np.zeros(indices.shape[0], dtype=np.bool)
+    if hasattr(config, 'allowed_label') and config.allowed_label != "":
+        lbl_range = config.allowed_label.split(",")
+        lbl_range = [int(i) for i in lbl_range]
+    else:
+        lbl_range = np.arange(1000)
+        np.random.shuffle(lbl_range)
+        lbl_range = lbl_range[:config.num_label]
+    for i in lbl_range:
+        mask2[np.where(labels == i)[0][:]] = True
+    indices = indices[mask2]
+
+    unlabeled_loader = DataBatchLoader(config, train_set, indices, config.train_batch_size_2,
+                                       transform=transform, img_side=config.image_side)
+
+    lind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind.npy'.format(config.dataset, config.suffix))
+    uind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.uind.npy'.format(config.dataset, config.suffix))
+    tind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.tind.npy'.format(config.dataset, config.suffix))
+    if lab_ind and os.path.exists(lind_path):
+        assert os.path.exists(uind_path), "uind does not exist"
+        labeled_indices = np.load(lind_path)
+        unlabeled_indices = np.load(uind_path)
+        dev_indices = np.load(tind_path)
+        print("Find lab_ind!")
+        labeled_loader = DataBatchLoader(config, train_set, labeled_indices, config.train_batch_size,
+                                         transform=transform, img_side=config.image_side)
+        unlabeled_loader = DataBatchLoader(config, train_set, unlabeled_indices, config.train_batch_size,
+                                           transform=transform, img_side=config.image_side)
+        dev_loader = DataBatchLoader(config, test_set, dev_indices, config.dev_batch_size,
+                                     transform=transform, img_side=config.image_side)
+        return unlabeled_loader, dev_loader, labeled_loader, labeled_indices
+    else:
+        print("no lab_ind!")
+
+    return unlabeled_loader, unlabeled_loader
+
+
+def get_imagenet10_loaders(config):  # n*1*128*128
+    save_ind = True
+    tr_list = []
+    if hasattr(config, 'flip') and config.flip:
+        tr_list.append(transforms.RandomHorizontalFlip())
+    tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    # tr_list += [transforms.ToTensor(), transforms.Normalize((0.53, 0.53, 0.52), (0.29, 0.29, 0.28))]
+    transform = transforms.Compose(tr_list)
+    train_set = imagenet10(config.data_root, splitpart='train')  # untested
+    test_set = imagenet10(config.data_root, splitpart='val')  # untested
+    # 1000 cls
+    # train: 1,281,167, val: 50,000, test: 100,000, but no cls on test
+
+    num_data = len(train_set)
+    num_data2 = len(test_set)
+    indices = np.arange(num_data)
+    indices2 = np.arange(num_data2)
+    np.random.shuffle(indices)
+    labels = np.array([train_set[i][1] for i in indices], dtype=np.int64)
+    labels2 = np.array([test_set[i][1] for i in indices2], dtype=np.int64)
+
+    lind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.lind.npy'.format(config.dataset, config.suffix))
+    uind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.uind.npy'.format(config.dataset, config.suffix))
+    tind_path = os.path.join(config.save_dir, '{}.FM+VI.{}.tind.npy'.format(config.dataset, config.suffix))
+    if os.path.exists(lind_path) or \
+            (hasattr(config, "train_step")
+             and config.train_step != 1):  # try to load step 1 inds
+        assert os.path.exists(lind_path) and os.path.exists(uind_path), "step {} Unknown label inds".format(
+            config.train_step)
+        labeled_indices = np.load(lind_path)
+        unlabeled_indices = np.load(uind_path)
+        dev_indices = np.load(tind_path)
+        print("Find lab_ind!")
+        save_ind = False
+    else:
+        mask = np.zeros(num_data, dtype=np.bool)
+        mask2 = np.zeros(num_data, dtype=np.bool)
+        mask3 = np.zeros(num_data2, dtype=np.bool)
+        if hasattr(config, 'allowed_label') and config.allowed_label != "":
+            lbl_range = config.allowed_label.split(",")
+            lbl_range = [int(i) for i in lbl_range]
+        else:
+            lbl_range = np.arange(1000)
+            np.random.shuffle(lbl_range)
+            lbl_range = lbl_range[:config.num_label]
+
+        # the amount in a class: [732, 1300]; there are less than 1300 images in 104 classes.
+        min_num = 1301
+        for i in lbl_range:
+            mask[np.where(labels == i)[0][: config.size_labeled_data // config.num_label]] = True
+            mask3[np.where(labels2 == i)[0][:]] = True
+            min_num = min(min_num, np.where(labels == i)[0].shape[0])
+        for i in lbl_range:
+            mask2[np.where(labels == i)[0][:min_num]] = True
+        labeled_indices, unlabeled_indices = indices[mask], indices[mask2]
+        dev_indices = indices2[mask3]
+
+    print 'labeled size', labeled_indices.shape[0], 'unlabeled size', unlabeled_indices.shape[0], \
+        'dev size', dev_indices.shape[0]
+
+    labeled_loader = DataBatchLoader(config, train_set, labeled_indices, config.train_batch_size,
+                                transform=transform, img_side=config.image_side)
+    unlabeled_loader = DataBatchLoader(config, train_set, unlabeled_indices, config.train_batch_size_2,
+                                  transform=transform, img_side=config.image_side)
+    dev_loader = DataBatchLoader(config, test_set, dev_indices, config.dev_batch_size,
+                            transform=transform, img_side=config.image_side)
+
+    special_set = []
+    # save label indices
+    if save_ind:  # save step-1 / non-step inds
+        np.save(lind_path, labeled_indices)
+        np.save(uind_path, unlabeled_indices)
+        np.save(tind_path, dev_indices)
+
+    return labeled_loader, unlabeled_loader, dev_loader, special_set
+
+
 def get_data_loaders_test(config):
     dataset = config.dataset
     if dataset == 'cifar':
@@ -641,6 +900,8 @@ def get_data_loaders_test(config):
         return get_stl10_loaders_test(config)
     elif dataset == 'coil20':
         return get_coil20_loaders_test(config)
+    elif dataset == 'imagenet10':
+        return get_imagenet10_loaders_test(config)
     else:
         print("dataset wrong: {}".format(dataset))
 
@@ -653,5 +914,7 @@ def get_data_loaders(config):
         return get_stl10_loaders(config)
     elif dataset == 'coil20':
         return get_coil20_loaders(config)
+    elif dataset == 'imagenet10':
+        return get_imagenet10_loaders(config)
     else:
         print("dataset wrong: {}".format(dataset))

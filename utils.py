@@ -8,9 +8,15 @@ from torch.autograd import Variable
 # pdb.set_trace = lambda: None
 
 def gaussian_nll(mu, log_sigma, noise):
-    NLL = torch.sum(log_sigma, 1) + \
-    torch.sum(((noise - mu) / (1e-8 + torch.exp(log_sigma))) ** 2, 1) / 2.
-    return NLL.mean()
+    # NLL = torch.sum(log_sigma, 1) + \
+    #       torch.sum(((noise - mu) / (1e-8 + torch.exp(log_sigma))) ** 2, 1) / 2.
+    NLL = torch.mean(log_sigma, 1) + \
+          torch.mean(((noise - mu) / (1e-8 + torch.exp(log_sigma))) ** 2, 1) / 2.
+    norm_nll = NLL.mean()
+    while(norm_nll.data[0] > 10.):
+        norm_nll /= 10.
+    # norm_nll = NLL.mean() / log_sigma.size(1)
+    return norm_nll
 
 def schedule(p):
     return 2.0 / (1.0 + math.exp(- 10.0 * p)) - 1

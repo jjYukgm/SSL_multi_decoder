@@ -240,8 +240,10 @@ class Discriminative(thisModule):
         elif config.dataset == 'cifar':
             n_filter_1, n_filter_2 = 96, 192
         elif config.dataset == 'stl10':
-            n_filter_1, n_filter_2 = 96, 192
+            n_filter_1, n_filter_2 = 128, 192
         elif config.dataset == 'coil20':
+            n_filter_1, n_filter_2 = 96, 192
+        elif config.dataset == 'imagenet10':
             n_filter_1, n_filter_2 = 96, 192
         else:
             raise ValueError('dataset not found: {}'.format(config.dataset))
@@ -298,6 +300,8 @@ class Discriminative_out(thisModule):
         if config.dataset == 'svhn':
             n_filter_1, n_filter_2 = 64, 128
         elif config.dataset == 'cifar':
+            n_filter_1, n_filter_2 = 96, 192
+        elif config.dataset == 'imagenet10':
             n_filter_1, n_filter_2 = 96, 192
         else:
             raise ValueError('dataset not found: {}'.format(config.dataset))
@@ -466,11 +470,11 @@ class Encoder(thisModule):
 
 
 # ref: https://github.com/kevinlu1211/pytorch-unet-resnet-50-encoder/blob/master/u_net_resnet_50_encoder.py
-class UNetWithResnet50Encoder(thisModule):
+class UNetWithResnetEncoder(thisModule):
     DEPTH = 6
 
     def __init__(self, n_classes=3, res='50'):
-        super(UNetWithResnet50Encoder, self).__init__()
+        super(UNetWithResnetEncoder, self).__init__()
         res = str(res)
         if res == '50':
             resnet = torchvision.models.resnet.resnet50(pretrained=True)
@@ -492,13 +496,13 @@ class UNetWithResnet50Encoder(thisModule):
                 down_blocks.append(bottleneck)
         self.down_blocks = nn.ModuleList(down_blocks)
         self.bridge = Bridge(chas[0], chas[0])
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[0], chas[1]))
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[1], chas[2]))
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[2], chas[3]))
-        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[4] + chas[5], out_channels=chas[4],
-                                                    up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
-        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[5] + 3, out_channels=chas[5],
-                                                    up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[0], chas[1]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[1], chas[2]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[2], chas[3]))
+        up_blocks.append(UpBlockForUNetWithResNet(in_channels=chas[4] + chas[5], out_channels=chas[4],
+                                                  up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
+        up_blocks.append(UpBlockForUNetWithResNet(in_channels=chas[5] + 3, out_channels=chas[5],
+                                                  up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
         # self.bridge = Bridge(2048, 2048)
         # up_blocks.append(UpBlockForUNetWithResNet50(2048, 1024))
         # up_blocks.append(UpBlockForUNetWithResNet50(1024, 512))
@@ -537,7 +541,7 @@ class UNetWithResnet50Encoder(thisModule):
 
         for i, block in enumerate(self.down_blocks, 2):
             x = block(x)
-            if i == (UNetWithResnet50Encoder.DEPTH - 1):
+            if i == (UNetWithResnetEncoder.DEPTH - 1):
                 continue
             pre_pools["layer_{}".format(i)] = x
 
@@ -547,12 +551,12 @@ class UNetWithResnet50Encoder(thisModule):
             x = x.mean(3, True).mean(2, True)
             return x.view(x.size(0), -1)
         elif skip_encode:
-            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+            key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1)
             pre_pools[key] = x
             return pre_pools
 
         for i, block in enumerate(self.up_blocks, 1):
-            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1 - i)
             x = block(x, pre_pools[key])
         output_feature_map = x
         x = self.out(x)
@@ -563,10 +567,10 @@ class UNetWithResnet50Encoder(thisModule):
             return x
 
     def decode(self, pre_pools, with_output_feature_map=False):
-        key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+        key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1)
         x = pre_pools[key]
         for i, block in enumerate(self.up_blocks, 1):
-            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1 - i)
             x = block(x, pre_pools[key])
         output_feature_map = x
         x = self.out(x)
@@ -577,10 +581,10 @@ class UNetWithResnet50Encoder(thisModule):
             return x
 
 
-class Resnet50Decoder_skip(thisModule):
+class ResnetDecoder_skip(thisModule):
     def __init__(self, n_classes=3, res='50'):
         # n_classes: output channels
-        super(Resnet50Decoder_skip, self).__init__()
+        super(ResnetDecoder_skip, self).__init__()
         res = str(res)
         if res == '50':
             chas = [2048, 1024, 512, 256, 128, 64]
@@ -592,13 +596,13 @@ class Resnet50Decoder_skip(thisModule):
             assert False, "The res = {}".format(res)
 
         up_blocks = []
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[0], chas[1]))
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[1], chas[2]))
-        up_blocks.append(UpBlockForUNetWithResNet50(chas[2], chas[3]))
-        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[4] + chas[5], out_channels=chas[4],
-                                                    up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
-        up_blocks.append(UpBlockForUNetWithResNet50(in_channels=chas[5] + 3, out_channels=chas[5],
-                                                    up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[0], chas[1]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[1], chas[2]))
+        up_blocks.append(UpBlockForUNetWithResNet(chas[2], chas[3]))
+        up_blocks.append(UpBlockForUNetWithResNet(in_channels=chas[4] + chas[5], out_channels=chas[4],
+                                                  up_conv_in_channels=chas[3], up_conv_out_channels=chas[4]))
+        up_blocks.append(UpBlockForUNetWithResNet(in_channels=chas[5] + 3, out_channels=chas[5],
+                                                  up_conv_in_channels=chas[4], up_conv_out_channels=chas[5]))
 
         self.up_blocks = nn.ModuleList(up_blocks)
 
@@ -617,10 +621,10 @@ class Resnet50Decoder_skip(thisModule):
                 m.bias.data.zero_()
 
     def forward(self, pre_pools, with_output_feature_map=False):
-        key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1)
+        key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1)
         x = pre_pools[key]
         for i, block in enumerate(self.up_blocks, 1):
-            key = "layer_{}".format(UNetWithResnet50Encoder.DEPTH - 1 - i)
+            key = "layer_{}".format(UNetWithResnetEncoder.DEPTH - 1 - i)
             x = block(x, pre_pools[key])
         output_feature_map = x
         x = self.out(x)
