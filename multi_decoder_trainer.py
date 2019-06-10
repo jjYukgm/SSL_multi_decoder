@@ -169,7 +169,10 @@ class Trainer(object):
         gen_feat2 = self.gen[0](unl_images, skip_encode=True)
         # for i in range(self.config.num_label):
         gen_images2 = self.gen[0].decode(gen_feat2)
-        unl_cons_loss += nn.MSELoss()(gen_images2, unl_images)
+        if self.config.rssim:
+            unl_cons_loss += - losses.SSIM(gen_images2, unl_images)
+        else:
+            unl_cons_loss += nn.MSELoss()(gen_images2, unl_images)
         # mask = (lab_labels == i).nonzero()
         # if mask.nelement() <= 1:
         #     continue
@@ -349,30 +352,10 @@ class Trainer(object):
         el_loss = 0
 
         # enc lab center
-        if iter % (self.batch_per_epoch*config.eg_ratio) == 0 and config.el_weight > 0:
-            self.lab_feat_cen = [None] * config.num_label
-            lab_num = [0] * config.num_label
-            # all lab feat sum
-            local_loader = self.labeled_loader.get_iter(shuffle=False)
-            for img, lbl in local_loader:
-                img, lbl = Variable(img.cuda()), Variable(lbl.cuda())
-                loc_feat = self.gen[0](img, encode=True).detach()
-                for i in range(config.num_label):
-                    mask = (lbl == i).nonzero()
-                    mask_num = mask.nelement()
-                    if mask_num < 1:
-                        continue
-                    loc_feat2 = loc_feat[mask[:,0]]
-                    if mask_num != 1:
-                        loc_feat2 = torch.sum(loc_feat2, 0).unsqueeze(0)
-                    if self.lab_feat_cen[i] is None:
-                        self.lab_feat_cen[i] = loc_feat2
-                    else:
-                        self.lab_feat_cen[i] += loc_feat2
-                    lab_num[i] += mask_num
-            # feat sum -> feat mean
-            for i in range(config.num_label):
-                self.lab_feat_cen[i] = self.lab_feat_cen[i] / lab_num[i]
+        if iter % (self.batch_per_epoch*config.eg_ratio) == 0 and \
+                (config.el_weight > 0 or config.gl_weight > 0):
+            self.cal_lab_feat_cen()
+
 
 
                 # update # d / 1 g
@@ -412,32 +395,37 @@ class Trainer(object):
                 ef_loss += torch.mean(torch.max(ts - ef_std, Variable(torch.zeros(ef_std.size())).cuda()))
                 ef_loss *= config.ef_weight
 
-            if config.gf_weight > 0 or config.gn_weight > 0: # or config.gl_weight > 0:
+            if config.gf_weight > 0 or config.gn_weight > 0 or config.gl_weight > 0:
                 gen_feat = self.gen[0](gen_images, encode=True)
             # gen lab feat loss: mean(En(xl)) - mean(En(De(En(xl))))
             if config.gl_weight > 0:
-                diff_ul = torch.abs(torch.mean(lab_feat, 0) - torch.mean(unl_feat, 0))
-                gl_ts = torch.mean(diff_ul) * 2
                 for i in range(config.num_label):
-                    mask = (lab_labels == i).nonzero()
-                    mask_num = mask.nelement()
-                    if mask_num < 1:
-                        continue
-                    # part_lab_images = lab_images[mask[:,0]]
-                    # gen_lab_feat = self.gen[0](self.gen[i].decode(
-                    #     self.gen[0](part_lab_images, skip_encode=True)), encode=True)
-                    mean_mask_feat = lab_feat[mask[:,0]]
-                    if mask_num != 1:
-                        mean_mask_feat = torch.mean(mean_mask_feat, 0)
-                        # gen_lab_feat = torch.mean(gen_lab_feat, 0)
-                    # gen_unl_feat = self.gen[i].decode(self.gen[0](unl_images, skip_encode=True))
                     gen_unl_feat = torch.mean(gen_feat[range(i*img_per_gen, (i+1)*img_per_gen)], 0)
-                    diff = torch.abs(mean_mask_feat - gen_unl_feat)
-                    gl_loss += mask_num * \
-                               torch.mean(torch.max(diff - gl_ts,
-                                                    Variable(torch.zeros(diff.size())).cuda()))
-                gl_loss /= lab_feat.size(0)
+                    gl_loss += nn.KLDivLoss()(gen_unl_feat, self.lab_feat_cen[i])
                 gl_loss *= config.gl_weight
+                #
+                # diff_ul = torch.abs(torch.mean(lab_feat, 0) - torch.mean(unl_feat, 0))
+                # gl_ts = torch.mean(diff_ul) * 2
+                # for i in range(config.num_label):
+                #     mask = (lab_labels == i).nonzero()
+                #     mask_num = mask.nelement()
+                #     if mask_num < 1:
+                #         continue
+                #     # part_lab_images = lab_images[mask[:,0]]
+                #     # gen_lab_feat = self.gen[0](self.gen[i].decode(
+                #     #     self.gen[0](part_lab_images, skip_encode=True)), encode=True)
+                #     mean_mask_feat = lab_feat[mask[:,0]]
+                #     if mask_num != 1:
+                #         mean_mask_feat = torch.mean(mean_mask_feat, 0)
+                #         # gen_lab_feat = torch.mean(gen_lab_feat, 0)
+                #     # gen_unl_feat = self.gen[i].decode(self.gen[0](unl_images, skip_encode=True))
+                #     gen_unl_feat = torch.mean(gen_feat[range(i*img_per_gen, (i+1)*img_per_gen)], 0)
+                #     diff = torch.abs(mean_mask_feat - gen_unl_feat)
+                #     gl_loss += mask_num * \
+                #                torch.mean(torch.max(diff - gl_ts,
+                #                                     Variable(torch.zeros(diff.size())).cuda()))
+                # gl_loss /= lab_feat.size(0)
+                # gl_loss *= config.gl_weight
 
             # Feature matching loss:  En(xu) - En(De(En(xu)))
             if config.gf_weight > 0:
@@ -461,7 +449,11 @@ class Trainer(object):
                 unl_tmp = unl_images[:img_per_gen].repeat(config.num_label, 1, 1, 1)
                 # blur
                 # get nn.L1Loss;F.MSELoss;nn.KLDivLoss
-                gr_loss = nn.MSELoss()(gen_images, unl_tmp)
+
+                if self.config.rssim:
+                    gr_loss = -losses.SSIM()(gen_images, unl_tmp)
+                else:
+                    gr_loss = nn.MSELoss()(gen_images, unl_tmp)
                 gr_loss *= config.gr_weight
 
             # could impact the gr
@@ -547,7 +539,8 @@ class Trainer(object):
                 st_loss += config.st_weight * nn.KLDivLoss()(gen_gram, unl_gram)
 
             # Generator loss
-            g_loss = fm_loss + nei_loss + \
+            g_loss = Variable(torch.zeros((1,1)), requires_grad=True).cuda() + \
+                     fm_loss + nei_loss + \
                      ef_loss + el_loss + \
                      tv_loss + st_loss + \
                      gl_loss + gn_loss + gr_loss + gc_loss
@@ -582,7 +575,7 @@ class Trainer(object):
             if config.gn_weight > 0: monitor_dict['gn loss'] = gn_loss.data[0] * config.dg_ratio
             if config.gr_weight > 0: monitor_dict['gr loss'] = gr_loss.data[0] * config.dg_ratio
             if config.gc_weight > 0: monitor_dict['gc loss'] = gc_loss.data[0] * config.dg_ratio
-            if config.gl_weight > 0: monitor_dict['gl ts'] = gl_ts.data[0] * config.dg_ratio
+            # if config.gl_weight > 0: monitor_dict['gl ts'] = gl_ts.data[0] * config.dg_ratio
         elif iter % config.dg_ratio != 0:
             if config.gf_weight > 0: monitor_dict['fm loss'] = 0
             if config.ef_weight > 0: monitor_dict['ef loss'] = 0
@@ -594,7 +587,7 @@ class Trainer(object):
             if config.gn_weight > 0: monitor_dict['gn loss'] = 0
             if config.gr_weight > 0: monitor_dict['gr loss'] = 0
             if config.gc_weight > 0: monitor_dict['gc loss'] = 0
-            if config.gl_weight > 0: monitor_dict['gl ts'] = 0
+            # if config.gl_weight > 0: monitor_dict['gl ts'] = 0
 
         return monitor_dict
 
@@ -836,6 +829,7 @@ class Trainer(object):
                 self.save_model('D2', epo_label)
 
     def resume(self, epo_label):  # ta
+        self.cal_lab_feat_cen()
         # load old
         if hasattr(self, 'dis'):
             self.load_model(self.dis, 'D', epo_label)
@@ -1026,11 +1020,37 @@ class Trainer(object):
             iter += 1
             # self.iter_cnt += 1
 
+    def cal_lab_feat_cen(self):
+        config = self.config
+        self.lab_feat_cen = [None] * config.num_label
+        lab_num = [0] * config.num_label
+        # all lab feat sum
+        local_loader = self.labeled_loader.get_iter(shuffle=False)
+        for img, lbl in local_loader:
+            img, lbl = Variable(img.cuda()), Variable(lbl.cuda())
+            loc_feat = self.gen[0](img, encode=True).detach()
+            for i in range(config.num_label):
+                mask = (lbl == i).nonzero()
+                mask_num = mask.nelement()
+                if mask_num < 1:
+                    continue
+                loc_feat2 = loc_feat[mask[:,0]]
+                if mask_num != 1:
+                    loc_feat2 = torch.sum(loc_feat2, 0).unsqueeze(0)
+                if self.lab_feat_cen[i] is None:
+                    self.lab_feat_cen[i] = loc_feat2
+                else:
+                    self.lab_feat_cen[i] += loc_feat2
+                lab_num[i] += mask_num
+        # feat sum -> feat mean
+        for i in range(config.num_label):
+            self.lab_feat_cen[i] = self.lab_feat_cen[i] / lab_num[i]
+
 
 if __name__ == '__main__':
     cc = config.cifarmu_config()
-    parser = argparse.ArgumentParser(description='cifarmu_trainer.py')
-    parser.add_argument('-suffix', default='mu0', type=str, help="Suffix added to the save images.")
+    parser = argparse.ArgumentParser(description='multi_decoder_trainer.py')
+    parser.add_argument('-suffix', default='md0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', dest='resume', action='store_true')
     parser.add_argument('-num_label', default=cc.num_label, type=int,
                         help="label num")
@@ -1039,7 +1059,7 @@ if __name__ == '__main__':
     parser.add_argument('-dataset', default=cc.dataset, type=str,
                         help="dataset: cifar, stl10, coil20")
     parser.add_argument('-image_side', default="32", type=int,
-                        help="cifar: 32, stl10: 96")
+                        help="cifar: 32, stl10: 96, coil20: 128, imagenet10: 256")
     parser.add_argument('-train_step', default=cc.train_step, type=int,
                         help="train step: 1, 2")
     parser.add_argument('-step1_epo', default=0, type=int,
@@ -1140,7 +1160,9 @@ if __name__ == '__main__':
     parser.add_argument('-dt', dest='dis_triple', action='store_true',
                         help="trible dis")
     parser.add_argument('-hgn', dest='halfgnoise', action='store_true',
-                        help="whether the wwhole E(img) is the input of Decoder")
+                        help="whether the whole E(img) is not the input of Decoder")
+    parser.add_argument('-rs', dest='rssim', action='store_true',
+                        help="gr loss uses ssim or not")
     parser.add_argument('-uc', dest='dis_uc', action='store_true',
                         help="dis uncertainty or not")
     parser.set_defaults(resume=False)
@@ -1148,6 +1170,7 @@ if __name__ == '__main__':
     parser.set_defaults(dis_triple=False)
     parser.set_defaults(halfgnoise=False)
     parser.set_defaults(dis_uc=False)
+    parser.set_defaults(rssim=False)
     parser.set_defaults(flip=cc.flip)
     args = parser.parse_args()
 

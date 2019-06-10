@@ -772,8 +772,8 @@ def get_imagenet10_loaders_test(config, lab_ind=True):
     tr_list += [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     # tr_list += [transforms.ToTensor(), transforms.Normalize((0.53, 0.53, 0.52), (0.29, 0.29, 0.28))]
     transform = transforms.Compose(tr_list)
-    train_set = imagenet10(config.data_root, splitpart='trainval')  # untested
-    test_set = imagenet10(config.data_root, splitpart='test')  # untested
+    train_set = imagenet10(config.data_root, splitpart='train')  # untested
+    test_set = imagenet10(config.data_root, splitpart='val')  # untested
 
     num_data = len(train_set)
     indices = np.arange(num_data)

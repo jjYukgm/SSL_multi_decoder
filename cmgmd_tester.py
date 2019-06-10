@@ -918,7 +918,7 @@ class Tester(object):
 
 if __name__ == '__main__':
     cc = config.cifarmg_config()
-    parser = argparse.ArgumentParser(description='cifarmg_tester.py')
+    parser = argparse.ArgumentParser(description='cmgmd_tester.py')
     parser.add_argument('-suffix', default='mg0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', dest='resume', action='store_true')
     parser.add_argument('-dataset', default=cc.dataset, type=str,
