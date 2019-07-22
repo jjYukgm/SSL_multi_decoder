@@ -253,7 +253,7 @@ class Tester(object):
             self.iter_cnt += 1
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='cifar_tester.py')
+    parser = argparse.ArgumentParser(description='model_tester.py')
     parser.add_argument('-suffix', default='run0', type=str, help="Suffix added to the save images.")
     parser.add_argument('-r', default='', type=str, help="Suffix added to the save images.")
 
