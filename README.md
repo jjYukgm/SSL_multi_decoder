@@ -29,6 +29,17 @@ python multi_decoder_trainer.py -suffix test001 -max_epochs 8 -dataset imagenet1
 python multi_decoder_trainer.py -suffix test001 -max_epochs 30 -dataset imagenet10 -num_label 10 -ld 3000 -image_side 64 -gen_mode 34 -train_step 2 -step1_epo 8 -dis_channels 512 -con_coef 5e-1 -dgl_weight 1e-2 -uc -ef_weight 3e-1 -gf_weight 7e-1 -gl_weight 8e-1 -gr_weight 1e-1 -gc_weight 1e-3 -gn_weight 1e-5 -nei_margin 5e-2 -dg_ratio 5 -eg_ratio 1
 ```
 
+To get analysis
+```
+# produce testing results and TSNEs
+python cmgmd_tester.py -nsg -mu -dl -tsne -dataset imagenet10 -gen_iter 5 -suffix test001 -last_epo_lbl 10000
+# produce example matrix
+python cmgmd_tester.py -mu -dl -nstf -dataset imagenet10 -gen_iter 5 -suffix test001 -last_epo_lbl 10000
+# produce testing results and images examples
+python cmgmd_tester.py -mu -dl -dataset imagenet10 -gen_iter 5 -suffix test001 -last_epo_lbl 10000
+```
+
+
 To reproduce baseline results
 ```
 python svhn_trainer.py
